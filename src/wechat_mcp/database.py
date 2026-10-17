@@ -26,6 +26,8 @@ def release_connections() -> None:
 
 
 def get_connection():
+    from .config import DB_PATH
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -36,6 +38,7 @@ def get_connection():
     return conn
 
 def init_schema():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS meta (
