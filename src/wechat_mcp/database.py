@@ -6,7 +6,7 @@ import logging
 
 from .config import DB_PATH, get_decrypted_dir
 from .adapters import route_sync
-from .adapters.media import sync_favorites_v4, sync_media_v4
+from .adapters.media import sync_emoticons_v4, sync_favorites_v4, sync_media_v4
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,19 @@ def init_schema():
             from_user TEXT,
             raw_content TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS emoticons (
+            md5 TEXT PRIMARY KEY,
+            caption TEXT,
+            package_id TEXT,
+            package_name TEXT,
+            kind TEXT,
+            thumb_url TEXT,
+            cdn_url TEXT,
+            designer_id TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_emoticons_package ON emoticons(package_id);
     """)
     conn.commit()
     conn.close()
@@ -158,6 +171,7 @@ def sync_data(force: bool = False) -> dict:
     if adapter_used in ("v4", "fallback"):
         sync_media_v4(decrypted_dir, cur)
         sync_favorites_v4(decrypted_dir, cur)
+        sync_emoticons_v4(decrypted_dir, cur)
 
     # 更新会话统计与 FTS 索引
     cur.execute("""

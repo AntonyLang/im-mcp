@@ -1,4 +1,5 @@
 import datetime
+import re
 import sqlite3
 import subprocess
 import sys
@@ -81,13 +82,14 @@ def _escape_like(value: str) -> str:
 
 
 @mcp.tool()
-def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
     """全文搜索绿泡泡聊天记录。
-    
+
     Args:
         query: 检索关键词（支持多词空格搜索）
         session_id: 可选，限定搜索特定的群聊（@chatroom）或联系人（绿泡泡号）
         limit: 返回数量，默认 20 条
+        offset: 分页偏移，默认 0；需要翻页查看更早的命中时递增
     """
     err = _check_db_initialized()
     if err:
@@ -120,11 +122,11 @@ def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: 
         sql += " AND m.session_username = ?"
         params.append(session_id)
 
-    sql += " ORDER BY m.create_time DESC LIMIT ?"
-    params.append(limit)
-    
+    sql += " ORDER BY m.create_time DESC LIMIT ? OFFSET ?"
+    params.extend([limit, max(0, offset)])
+
     rows = cur.execute(sql, params).fetchall()
-    
+
     results = []
     for r in rows:
         results.append({
@@ -648,6 +650,180 @@ def list_favorites(keyword: Optional[str] = None, limit: int = 20) -> List[Dict[
         }
         for r in rows
     ]
+
+@mcp.tool()
+def list_emoticons(keyword: Optional[str] = None, package: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """列出绿泡泡表情包与表情（含官方文字说明）。
+
+    Args:
+        keyword: 可选，按文字说明或表情包名搜索
+        package: 可选，按表情包名称筛选
+        limit: 返回数量，默认 50
+    """
+    err = _check_db_initialized()
+    if err:
+        return [{"error": err}]
+    conn = get_connection()
+    cur = conn.cursor()
+    sql = (
+        "SELECT md5, caption, package_id, package_name, kind, thumb_url, cdn_url, designer_id "
+        "FROM emoticons WHERE 1=1"
+    )
+    params: List[Any] = []
+    if keyword and keyword.strip():
+        kw = f"%{_escape_like(keyword.strip())}%"
+        sql += " AND (caption LIKE ? ESCAPE '\\' OR package_name LIKE ? ESCAPE '\\')"
+        params.extend([kw, kw])
+    if package and package.strip():
+        sql += " AND package_name LIKE ? ESCAPE '\\'"
+        params.append(f"%{_escape_like(package.strip())}%")
+    sql += " ORDER BY CASE WHEN caption = '' THEN 1 ELSE 0 END, package_name, caption LIMIT ?"
+    params.append(limit)
+    rows = cur.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@mcp.tool()
+def get_sync_status() -> Dict[str, Any]:
+    """查看本地索引的数据新鲜度与规模，判断是否需要重新运行 wechat-init 同步新消息。"""
+    err = _check_db_initialized()
+    if err:
+        return {"error": err}
+    conn = get_connection()
+    cur = conn.cursor()
+
+    def _one(query: str) -> int:
+        row = cur.execute(query).fetchone()
+        return row[0] if row and row[0] is not None else 0
+
+    counts = {
+        "messages": _one("SELECT COUNT(*) FROM messages"),
+        "contacts": _one("SELECT COUNT(*) FROM contacts"),
+        "sessions": _one("SELECT COUNT(*) FROM sessions"),
+        "chatroom_members": _one("SELECT COUNT(*) FROM chatroom_members"),
+        "media_files": _one("SELECT COUNT(*) FROM media_files"),
+        "favorites": _one("SELECT COUNT(*) FROM favorites"),
+        "emoticons": _one("SELECT COUNT(*) FROM emoticons"),
+    }
+    oldest = _one("SELECT min(create_time) FROM messages")
+    latest = _one("SELECT max(create_time) FROM messages")
+    conn.close()
+    return {
+        "database": str(DB_PATH),
+        "oldest_message": _ts_to_str(oldest),
+        "latest_message": _ts_to_str(latest),
+        "counts": counts,
+        "note": "解密库是初始化时的快照。微信有新消息时，需以管理员身份重新运行 wechat-init，再执行 wechat-init --etl-only 重建索引。",
+    }
+
+@mcp.tool()
+def get_persona_style(sender: str, session_id: Optional[str] = None, sample_limit: int = 300) -> Dict[str, Any]:
+    """分析某位联系人的沟通风格（统计画像 + 高频用语 + 典型语句），可用于风格蒸馏。
+
+    Args:
+        sender: 联系人昵称 / 微信号 / username
+        session_id: 可选，限定在某个群聊中分析
+        sample_limit: 参与分析的消息上限，默认 300
+    """
+    err = _check_db_initialized()
+    if err:
+        return {"error": err}
+    if not (sender or "").strip():
+        return {"error": "sender 不能为空"}
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # 解析目标联系人：先精确匹配，再模糊匹配
+    row = cur.execute(
+        "SELECT username, display_name FROM contacts "
+        "WHERE username = ? OR alias = ? OR display_name = ? LIMIT 1",
+        (sender.strip(), sender.strip(), sender.strip()),
+    ).fetchone()
+    if not row:
+        row = cur.execute(
+            "SELECT username, display_name FROM contacts "
+            "WHERE display_name LIKE ? ESCAPE '\\' LIMIT 1",
+            (f"%{_escape_like(sender.strip())}%",),
+        ).fetchone()
+    if not row:
+        conn.close()
+        return {"error": f"未找到联系人：{sender}（可先用 search_contacts 查询）"}
+
+    target_username = row["username"]
+    target_name = row["display_name"]
+
+    sql = "SELECT content, create_time, local_type FROM messages WHERE sender_username = ?"
+    params: List[Any] = [target_username]
+    if session_id:
+        sql += " AND session_username = ?"
+        params.append(session_id)
+    sql += " ORDER BY create_time DESC LIMIT ?"
+    params.append(max(1, min(sample_limit, 2000)))
+
+    rows = cur.execute(sql, params).fetchall()
+    conn.close()
+    if not rows:
+        return {"error": f"{target_name} 在指定范围内没有消息记录"}
+
+    from collections import Counter
+
+    texts = []
+    for r in rows:
+        if r["local_type"] != 1 or not r["content"]:
+            continue
+        # 去掉引用消息前缀的 wxid，避免污染高频短语统计与样本展示
+        cleaned_text = re.sub(r"^wxid_[A-Za-z0-9]+:\s*", "", r["content"]).strip()
+        if cleaned_text:
+            texts.append(cleaned_text)
+    type_counter = Counter(r["local_type"] for r in rows)
+    hour_counter = Counter(
+        datetime.datetime.fromtimestamp(_normalize_ts(r["create_time"])).hour
+        for r in rows
+        if r["create_time"]
+    )
+
+    lengths = [len(t) for t in texts] or [0]
+
+    # 高频用语：中文按 2-4 字 n-gram，英文/数字按完整词统计（避免无意义碎片）
+    phrases: Counter = Counter()
+    for text in texts:
+        cleaned = re.sub(r"\[[^\]]{1,12}\]", " ", text)
+        for chunk in re.findall(r"[\u4e00-\u9fff]+", cleaned):
+            for n in (2, 3, 4):
+                for i in range(len(chunk) - n + 1):
+                    phrases[chunk[i : i + n]] += 1
+        for word in re.findall(r"[A-Za-z0-9]{2,}", cleaned):
+            phrases[word.lower()] += 1
+
+    tone_candidates = [
+        "啊", "吧", "呢", "嘛", "哦", "呀", "哈", "嘿", "嗯", "唉", "哎", "诶",
+        "哇", "草", "靠", "笑死", "哈哈", "hhh", "emm",
+    ]
+    tone = {w: sum(t.count(w) for t in texts) for w in tone_candidates}
+    tone = {k: v for k, v in sorted(tone.items(), key=lambda kv: -kv[1]) if v > 0}
+
+    samples: List[str] = []
+    for text in texts:
+        if 5 <= len(text) <= 80 and text not in samples:
+            samples.append(text)
+        if len(samples) >= 8:
+            break
+
+    return {
+        "sender": target_name,
+        "username": target_username,
+        "scope_session": session_id or "(全部会话)",
+        "analyzed_messages": len(rows),
+        "text_messages": len(texts),
+        "avg_length": round(sum(lengths) / len(lengths), 1),
+        "max_length": max(lengths),
+        "message_type_distribution": {str(k): v for k, v in type_counter.most_common(10)},
+        "active_hours": {f"{h:02d}": n for h, n in sorted(hour_counter.items())},
+        "tone_words": tone,
+        "top_phrases": [{"phrase": p, "count": c} for p, c in phrases.most_common(60) if c >= 3][:20],
+        "samples": samples,
+    }
 
 def main():
     mcp.run()

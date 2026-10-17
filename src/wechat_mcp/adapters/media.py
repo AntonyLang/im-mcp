@@ -174,3 +174,80 @@ def sync_favorites_v4(decrypted_dir: Path, cur: sqlite3.Cursor) -> None:
         logger.info(f"Synced {count} favorites")
     except Exception as exc:
         logger.warning(f"Error syncing favorites: {exc}")
+
+
+def sync_emoticons_v4(decrypted_dir: Path, cur: sqlite3.Cursor) -> None:
+    """从 emoticon.db 建立表情包索引（md5 → 文字说明 / 所属表情包）"""
+    emo_db = decrypted_dir / "emoticon" / "emoticon.db"
+    if not emo_db.exists():
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{emo_db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+        # 表情包 id → 名称
+        packages: dict[str, str] = {}
+        if "kStoreEmoticonPackageTable" in tables:
+            for row in conn.execute(
+                "SELECT package_id_, package_name_ FROM kStoreEmoticonPackageTable"
+            ):
+                if row[0]:
+                    packages[row[0]] = row[1] or ""
+
+        count = 0
+
+        # 1) 非商店表情（自己添加的单张表情）
+        if "kNonStoreEmoticonTable" in tables:
+            for row in conn.execute(
+                "SELECT md5, caption, product_id, thumb_url, cdn_url, designer_id "
+                "FROM kNonStoreEmoticonTable"
+            ):
+                if not row["md5"]:
+                    continue
+                product_id = row["product_id"] or ""
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO emoticons
+                    (md5, caption, package_id, package_name, kind, thumb_url, cdn_url, designer_id)
+                    VALUES (?, ?, ?, ?, 'non_store', ?, ?, ?)
+                    """,
+                    (
+                        row["md5"],
+                        row["caption"] or "",
+                        product_id,
+                        packages.get(product_id, ""),
+                        row["thumb_url"] or "",
+                        row["cdn_url"] or "",
+                        row["designer_id"] or "",
+                    ),
+                )
+                count += 1
+
+        # 2) 商店表情（带官方文字说明，可用于反查表情含义）
+        if "kStoreEmoticonCaptionsTable" in tables:
+            for row in conn.execute(
+                "SELECT md5_, package_id_, caption_ FROM kStoreEmoticonCaptionsTable"
+            ):
+                if not row["md5_"]:
+                    continue
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO emoticons
+                    (md5, caption, package_id, package_name, kind, thumb_url, cdn_url, designer_id)
+                    VALUES (?, ?, ?, ?, 'store', '', '', '')
+                    """,
+                    (
+                        row["md5_"],
+                        row["caption_"] or "",
+                        row["package_id_"] or "",
+                        packages.get(row["package_id_"], ""),
+                    ),
+                )
+                count += 1
+
+        conn.close()
+        logger.info(f"Indexed {count} emoticons")
+    except Exception as exc:
+        logger.warning(f"Error building emoticon index: {exc}")
