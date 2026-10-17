@@ -1,0 +1,76 @@
+# 数据目录（不应入库）
+.decrypted/
+.cache/
+.images/
+.export/
+.doc/
+.playwright-mcp/
+.tmp/
+.zcode/
+
+# 微信原始数据目录（若被拷贝进仓库根目录则忽略；gitignore 不支持仓库外绝对路径）
+/微信数据*/
+
+# Node / Python
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# 临时文件
+*.log
+*.tmp
+*.swp
+*.bak
+.DS_Store
+Thumbs.db
+backend/.tmp_*
+
+# 隐私/敏感数据（绝不入库）
+/m.json
+all_keys.json
+key.txt
+
+# 运行时产物
+/decrypted/
+/export/
+/images/
+
+# 编辑器
+.vscode/
+.idea/
+
+# 环境
+.env
+.env.*
+.venv/
+venv/
+backend/.venv/
+
+# 测试信息（禁止入库）：测试截图 / 测试产物 / 临时导出
+artifacts/
+.artifacts/
+screenshot*.png
+screenshot*.jpg
+contacts_*.csv
+contacts_*.json
+export_*.csv
+export_*.json
+export_*.ndjson
+export_*.txt
+
+# 隐私与定时任务本地配置
+.pi-loop.json
+.pi-loop.json.lock
+all_keys.json
+*.xlsx
+
+# 本地参考项目（不上传远程）
+reference/
+reference/*

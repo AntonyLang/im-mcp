@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "im-mcp"
+version = "0.0.1"
+description = "Fast, local, read-only MCP Server for WeChat & DingTalk chat history"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "stkoecn" }
+]
+dependencies = [
+    "mcp>=1.2.0,<2.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+wechat = [
+    "zstandard>=0.23.0",
+    "pycryptodome>=3.20.0",
+]
+dingtalk = [
+    "pycryptodome>=3.20.0",
+]
+all = [
+    "im-mcp[wechat,dingtalk]",
+]
+
+[project.scripts]
+wechat-mcp = "wechat_mcp.server:main"
+dingtalk-mcp = "dingtalk_mcp.server:main"
+wechat-init = "wechat_mcp.tools:main"
+dingtalk-init = "dingtalk_mcp.tools:main"
+im-clean = "im_clean:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wechat_mcp", "src/dingtalk_mcp", "src/im_clean.py"]
