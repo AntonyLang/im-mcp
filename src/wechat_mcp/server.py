@@ -29,13 +29,25 @@ def _check_db_initialized() -> Optional[str]:
     except Exception as e:
         return f"绿泡泡数据库无法访问: {e}。请尝试重新运行 `wechat-init`。"
 
+# 微信各版本 create_time 单位不一致：大于该阈值视为毫秒时间戳，否则视为秒
+_MS_THRESHOLD = 10**11
+
+
+def _ts_unit(ts: int) -> int:
+    """判断时间戳单位：1000=毫秒，1=秒"""
+    return 1000 if ts and ts > _MS_THRESHOLD else 1
+
+
+def _normalize_ts(ts: int) -> float:
+    """将秒级/毫秒级时间戳统一归一化为「秒」"""
+    return ts / _ts_unit(ts) if ts else ts
+
+
 def _ts_to_str(ts: int) -> str:
     """时间戳转人类可读时间"""
     if not ts:
         return ""
-    if ts > 10**11:
-        ts = ts / 1000
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.fromtimestamp(_normalize_ts(ts)).strftime("%Y-%m-%d %H:%M:%S")
 
 @mcp.tool()
 def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
@@ -159,10 +171,7 @@ def get_session_history(session_id: str, limit: int = 50, days: Optional[int] = 
     if days:
         cur.execute("SELECT max(create_time) FROM messages WHERE session_username = ?", (session_id,))
         max_ts = cur.fetchone()[0] or 0
-        if max_ts > 10**11:
-            start_ts = max_ts - (days * 24 * 3600 * 1000)
-        else:
-            start_ts = max_ts - (days * 24 * 3600)
+        start_ts = max_ts - int(days * 24 * 3600 * _ts_unit(max_ts))
         sql += " AND m.create_time >= ?"
         params.append(start_ts)
         
@@ -250,10 +259,14 @@ def get_messages_by_date(date: str, session_id: Optional[str] = None, limit: int
     try:
         dt_start = datetime.datetime.strptime(date, "%Y-%m-%d")
         dt_end = dt_start + datetime.timedelta(days=1)
-        start_ts = int(dt_start.timestamp() * 1000)
-        end_ts = int(dt_end.timestamp() * 1000)
     except Exception as e:
         return [{"error": f"Invalid date format: {e}"}]
+
+    # create_time 单位随微信版本而异（秒 / 毫秒），必须按实际单位换算查询区间
+    max_ts = cur.execute("SELECT max(create_time) FROM messages").fetchone()[0] or 0
+    unit = _ts_unit(max_ts)
+    start_ts = int(dt_start.timestamp() * unit)
+    end_ts = int(dt_end.timestamp() * unit)
         
     sql = """
         SELECT m.id, m.session_username, s.display_name AS session_name,
