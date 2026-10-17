@@ -356,8 +356,6 @@ def search_shared_files(keyword: Optional[str] = None, session_id: Optional[str]
 
 @mcp.tool()
 @_db_tool
-@mcp.tool()
-@_db_tool
 def get_message_image(message_id: int, include_base64: bool = False) -> Dict[str, Any]:
     """获取并解密指定消息关联的聊天图片。
     
