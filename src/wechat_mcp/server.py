@@ -81,6 +81,26 @@ def _escape_like(value: str) -> str:
     return (value or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _dedupe_phrases(phrases, min_count: int = 3, scan: int = 200, limit: int = 20) -> List[Dict[str, Any]]:
+    """把 n-gram 计数整理成短语列表，并过滤被更长短语完全覆盖的碎片。
+
+    2 字短语语义相对独立，保留；3-4 字短语若被同频或更高频的长短语包含，
+    视为碎片丢弃（例如「算力和」被「算力和数」覆盖）。
+    """
+    ranked = [(p, c) for p, c in phrases.most_common(scan) if c >= min_count]
+    result: List[Dict[str, Any]] = []
+    for phrase, count in ranked:
+        if len(phrase) > 2 and any(
+            other != phrase and phrase in other and other_count >= count
+            for other, other_count in ranked
+        ):
+            continue
+        result.append({"phrase": phrase, "count": count})
+        if len(result) >= limit:
+            break
+    return result
+
+
 @mcp.tool()
 def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
     """全文搜索绿泡泡聊天记录。
@@ -821,7 +841,7 @@ def get_persona_style(sender: str, session_id: Optional[str] = None, sample_limi
         "message_type_distribution": {str(k): v for k, v in type_counter.most_common(10)},
         "active_hours": {f"{h:02d}": n for h, n in sorted(hour_counter.items())},
         "tone_words": tone,
-        "top_phrases": [{"phrase": p, "count": c} for p, c in phrases.most_common(60) if c >= 3][:20],
+        "top_phrases": _dedupe_phrases(phrases),
         "samples": samples,
     }
 

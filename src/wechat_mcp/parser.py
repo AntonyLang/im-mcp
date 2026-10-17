@@ -112,8 +112,12 @@ def build_content(local_type: int, raw_content, raw_source) -> str:
     """将 raw_content / raw_source 根据 local_type 构建成可读字符串"""
     if local_type == 1:
         if isinstance(raw_content, bytes):
-            return maybe_zstd_decompress(raw_content).decode("utf-8", errors="ignore")
-        return str(raw_content or "")
+            text = maybe_zstd_decompress(raw_content).decode("utf-8", errors="ignore")
+        else:
+            text = str(raw_content or "")
+        # 群聊消息会把发送者编码成 `wxid_xxx:\n` 前缀（实测与 sender_username 100% 一致、
+        # 私聊从不出现），属冗余标记，清理后正文更可读
+        return re.sub(r"^wxid_[A-Za-z0-9]{4,}:\s*", "", text)
 
     # 系统消息（撤回 / 入群提示等）：正文多为可读文本，部分 type 为 sysmsg XML
     if local_type in (10000, 10002):
