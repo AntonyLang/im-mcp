@@ -49,6 +49,37 @@ def _ts_to_str(ts: int) -> str:
         return ""
     return datetime.datetime.fromtimestamp(_normalize_ts(ts)).strftime("%Y-%m-%d %H:%M:%S")
 
+
+def _parse_time_bound(value: str) -> datetime.datetime:
+    """解析时间参数：'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM[:SS]'"""
+    text = (value or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"无法解析时间 '{value}'，支持 YYYY-MM-DD 或 YYYY-MM-DD HH:MM[:SS]")
+
+
+def _time_range_to_ts(cur: sqlite3.Cursor, start: str, end: str) -> tuple:
+    """将人类可读时间范围转换为与库内 create_time 单位一致的查询区间"""
+    max_ts = cur.execute("SELECT max(create_time) FROM messages").fetchone()[0] or 0
+    unit = _ts_unit(max_ts)
+    start_dt = _parse_time_bound(start)
+    end_dt = _parse_time_bound(end)
+    # 结束时间只给到日期时，自动覆盖当天全天
+    if len((end or "").strip()) <= 10:
+        end_dt += datetime.timedelta(days=1)
+    if end_dt <= start_dt:
+        raise ValueError("结束时间必须晚于起始时间")
+    return int(start_dt.timestamp() * unit), int(end_dt.timestamp() * unit)
+
+
+def _escape_like(value: str) -> str:
+    """转义 LIKE 通配符（% _ \\），使用户输入按字面量匹配"""
+    return (value or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @mcp.tool()
 def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
     """全文搜索绿泡泡聊天记录。
@@ -64,25 +95,31 @@ def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: 
     conn = get_connection()
     cur = conn.cursor()
     
-    # 构造 FTS 查询
-    # 清理查询词中可能的特殊字符
-    clean_query = query.replace('"', '""')
-    
+    # 使用 LIKE 子串匹配而非 FTS5 MATCH：内置 unicode61 分词器会把连续中文当成
+    # 单个 token（搜「缓存」匹配不到「我缓存命中都降到98%」），中文召回率极低；
+    # 个人数据量（十万级）下 LIKE 全表扫描为百毫秒级，此处以正确性优先。
+    tokens = [t for t in (query or "").split() if t]
+    if not tokens:
+        conn.close()
+        return []
+
     sql = """
         SELECT m.id, m.session_username, s.display_name AS session_name,
                m.sender_username, c.display_name AS sender_name,
                m.create_time, m.content
-        FROM messages_fts fts
-        JOIN messages m ON fts.rowid = m.id
+        FROM messages m
         LEFT JOIN sessions s ON s.username = m.session_username
         LEFT JOIN contacts c ON c.username = m.sender_username
-        WHERE messages_fts MATCH ?
+        WHERE 1=1
     """
-    params = [clean_query]
+    params: List[Any] = []
+    for token in tokens:
+        sql += " AND m.content LIKE ? ESCAPE '\\'"
+        params.append(f"%{_escape_like(token)}%")
     if session_id:
         sql += " AND m.session_username = ?"
         params.append(session_id)
-        
+
     sql += " ORDER BY m.create_time DESC LIMIT ?"
     params.append(limit)
     
@@ -308,6 +345,221 @@ def sync_wechat_database(force: bool = False) -> Dict[str, Any]:
     etl_result = sync_data(force=force)
     return {
         "etl_step": etl_result
+    }
+
+@mcp.tool()
+def search_contacts(keyword: str, limit: int = 30) -> List[Dict[str, Any]]:
+    """搜索绿泡泡联系人（按昵称 / 备注 / 微信号匹配）。
+
+    Args:
+        keyword: 搜索关键字（昵称、备注或微信号片段）
+        limit: 返回数量，默认 30
+    """
+    err = _check_db_initialized()
+    if err:
+        return [{"error": err}]
+    if not (keyword or "").strip():
+        return [{"error": "keyword 不能为空"}]
+    conn = get_connection()
+    cur = conn.cursor()
+    kw = f"%{_escape_like(keyword.strip())}%"
+    rows = cur.execute("""
+        SELECT username, alias, display_name, type
+        FROM contacts
+        WHERE display_name LIKE ? ESCAPE '\\' OR alias LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\'
+        ORDER BY CASE WHEN alias IS NULL OR alias = '' THEN 1 ELSE 0 END, display_name
+        LIMIT ?
+    """, (kw, kw, kw, limit)).fetchall()
+    conn.close()
+    return [
+        {
+            "username": r["username"],
+            "display_name": r["display_name"],
+            "alias": r["alias"] or "",
+            "type": r["type"],
+        }
+        for r in rows
+    ]
+
+@mcp.tool()
+def list_chatroom_members(chatroom_id: str, keyword: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
+    """列出指定群聊的成员名单（自动关联联系人昵称与微信号）。
+
+    Args:
+        chatroom_id: 群聊唯一 ID（形如 12345678@chatroom，可用 list_wechat_sessions 查询）
+        keyword: 可选，按成员昵称 / 微信号 / username 过滤
+        limit: 返回数量，默认 200
+    """
+    err = _check_db_initialized()
+    if err:
+        return {"error": err}
+    if not (chatroom_id or "").strip():
+        return {"error": "chatroom_id 不能为空"}
+    conn = get_connection()
+    cur = conn.cursor()
+
+    total = cur.execute(
+        "SELECT COUNT(*) FROM chatroom_members WHERE chatroom_username = ?", (chatroom_id,)
+    ).fetchone()[0]
+    if total == 0:
+        conn.close()
+        return {"error": f"未找到群 {chatroom_id} 的成员记录，请确认群 ID（可用 list_wechat_sessions 查询）"}
+
+    sql = """
+        SELECT cm.member_username,
+               COALESCE(NULLIF(c.display_name, ''), cm.member_username) AS display_name,
+               COALESCE(c.alias, '') AS alias
+        FROM chatroom_members cm
+        LEFT JOIN contacts c ON c.username = cm.member_username
+        WHERE cm.chatroom_username = ?
+    """
+    params: List[Any] = [chatroom_id]
+    if keyword and keyword.strip():
+        sql += " AND (c.display_name LIKE ? ESCAPE '\\' OR c.alias LIKE ? ESCAPE '\\' OR cm.member_username LIKE ? ESCAPE '\\')"
+        kw = f"%{_escape_like(keyword.strip())}%"
+        params.extend([kw, kw, kw])
+    sql += " ORDER BY display_name LIMIT ?"
+    params.append(limit)
+
+    rows = cur.execute(sql, params).fetchall()
+    session_row = cur.execute(
+        "SELECT display_name FROM sessions WHERE username = ?", (chatroom_id,)
+    ).fetchone()
+    conn.close()
+
+    return {
+        "chatroom_id": chatroom_id,
+        "chatroom_name": session_row["display_name"] if session_row else chatroom_id,
+        "member_count": total,
+        "returned": len(rows),
+        "members": [
+            {
+                "username": r["member_username"],
+                "display_name": r["display_name"],
+                "alias": r["alias"],
+            }
+            for r in rows
+        ],
+    }
+
+@mcp.tool()
+def get_messages_by_range(start: str, end: str, session_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """按自定义时间范围查询聊天记录（支持跨天与任意时段，比按单日查询更灵活）。
+
+    Args:
+        start: 起始时间，'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM[:SS]'
+        end: 结束时间，同上；只给日期时自动覆盖当天全天
+        session_id: 可选，限定某个群聊或联系人
+        limit: 返回数量，默认 100
+    """
+    err = _check_db_initialized()
+    if err:
+        return [{"error": err}]
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        start_ts, end_ts = _time_range_to_ts(cur, start, end)
+    except ValueError as exc:
+        conn.close()
+        return [{"error": str(exc)}]
+
+    sql = """
+        SELECT m.id, m.session_username, s.display_name AS session_name,
+               m.sender_username, c.display_name AS sender_name,
+               m.create_time, m.content
+        FROM messages m
+        LEFT JOIN sessions s ON s.username = m.session_username
+        LEFT JOIN contacts c ON c.username = m.sender_username
+        WHERE m.create_time >= ? AND m.create_time < ?
+    """
+    params: List[Any] = [start_ts, end_ts]
+    if session_id:
+        sql += " AND m.session_username = ?"
+        params.append(session_id)
+    sql += " ORDER BY m.create_time ASC LIMIT ?"
+    params.append(limit)
+
+    rows = cur.execute(sql, params).fetchall()
+    conn.close()
+    return [
+        {
+            "id": r["id"],
+            "session_id": r["session_username"],
+            "session_name": r["session_name"] or r["session_username"],
+            "sender_name": r["sender_name"] or r["sender_username"],
+            "time": _ts_to_str(r["create_time"]),
+            "content": r["content"],
+        }
+        for r in rows
+    ]
+
+@mcp.tool()
+def get_chat_activity_stats(session_id: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, Any]:
+    """统计聊天活跃度：消息总量、按小时与按天分布、发言最多的人。
+
+    Args:
+        session_id: 可选，限定某个群聊或联系人（不传则统计全部会话）
+        start: 可选，起始时间 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM[:SS]'
+        end: 可选，结束时间，同上（需与 start 同时提供）
+    """
+    err = _check_db_initialized()
+    if err:
+        return {"error": err}
+    conn = get_connection()
+    cur = conn.cursor()
+
+    where = ["1=1"]
+    params: List[Any] = []
+    if session_id:
+        where.append("m.session_username = ?")
+        params.append(session_id)
+    if start and end:
+        try:
+            start_ts, end_ts = _time_range_to_ts(cur, start, end)
+        except ValueError as exc:
+            conn.close()
+            return {"error": str(exc)}
+        where.append("m.create_time >= ? AND m.create_time < ?")
+        params.extend([start_ts, end_ts])
+    where_sql = " AND ".join(where)
+
+    max_ts = cur.execute("SELECT max(create_time) FROM messages").fetchone()[0] or 0
+    divisor = _ts_unit(max_ts)
+
+    total = cur.execute(f"SELECT COUNT(*) FROM messages m WHERE {where_sql}", params).fetchone()[0]
+    hourly = cur.execute(f"""
+        SELECT strftime('%H', datetime(create_time / {divisor}, 'unixepoch', 'localtime')) AS h,
+               COUNT(*) AS n
+        FROM messages m WHERE {where_sql}
+        GROUP BY h ORDER BY h
+    """, params).fetchall()
+    daily = cur.execute(f"""
+        SELECT strftime('%Y-%m-%d', datetime(create_time / {divisor}, 'unixepoch', 'localtime')) AS d,
+               COUNT(*) AS n
+        FROM messages m WHERE {where_sql}
+        GROUP BY d ORDER BY d
+    """, params).fetchall()
+    top_senders = cur.execute(f"""
+        SELECT COALESCE(NULLIF(c.display_name, ''), m.sender_username) AS name,
+               m.sender_username AS username, COUNT(*) AS n
+        FROM messages m
+        LEFT JOIN contacts c ON c.username = m.sender_username
+        WHERE {where_sql}
+        GROUP BY m.sender_username
+        ORDER BY n DESC LIMIT 10
+    """, params).fetchall()
+    conn.close()
+
+    return {
+        "session_id": session_id or "(全部会话)",
+        "time_range": {"start": start, "end": end} if (start and end) else None,
+        "total_messages": total,
+        "hourly_distribution": {r["h"]: r["n"] for r in hourly},
+        "daily_distribution": {r["d"]: r["n"] for r in daily},
+        "top_senders": [
+            {"display_name": r["name"], "username": r["username"], "message_count": r["n"]}
+            for r in top_senders
+        ],
     }
 
 def main():
