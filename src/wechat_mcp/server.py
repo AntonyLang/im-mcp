@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .config import DB_PATH, BASE_DIR
 from .database import get_connection, sync_data
+from .images import get_image_for_message
 
 # 初始化 FastMCP 服务器
 mcp = FastMCP("wechat-mcp")
@@ -231,6 +232,22 @@ def search_shared_files(keyword: Optional[str] = None, session_id: Optional[str]
         })
     conn.close()
     return results
+
+@mcp.tool()
+def get_message_image(message_id: int, include_base64: bool = False) -> Dict[str, Any]:
+    """获取并解密指定消息关联的聊天图片。
+    
+    优先返回已解密图片的本地物理绝对路径（避免直接将大图 base64 注入大模型导致上下文窗口被撑爆）。
+    如需将图片传递给多模态大模型进行看图分析，可设置 include_base64=True。
+    
+    Args:
+        message_id: 消息 ID（来自 search_wechat_messages 或 get_messages_by_date 返回的 id 字段）
+        include_base64: 是否在返回结果中包含图片的 base64 字符串（默认 False）
+    """
+    err = _check_db_initialized()
+    if err:
+        return {"error": err}
+    return get_image_for_message(message_id=message_id, include_base64=include_base64)
 
 @mcp.tool()
 def get_messages_by_date(date: str, session_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:

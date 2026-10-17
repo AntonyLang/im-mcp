@@ -75,9 +75,12 @@ wechat-init
 
 #### 微信 (wechat) 推荐调用顺序：
 1. `list_wechat_sessions(limit=20)`: 先列出最近活跃的会话/群聊，拿到关键的 `session_id`（如 `xxx@chatroom` 或微信号）。
-2. `search_wechat_messages(query="关键词", limit=50)`: 全局全文检索聊天内容。
+2. `search_wechat_messages(query="关键词", limit=50)`: 全局全文检索聊天内容（返回消息列表中包含 `id`、时间、发送者及内容）。
 3. `get_session_history(session_id="...", limit=100)`: 获取目标会话的上下文消息流。
-4. `search_shared_files(keyword="...", limit=20)`: 定位群内或私聊传输的文件路径。
+4. `get_message_image(message_id=...)`: **聊天图片按需解密**。当搜索或历史消息中包含 `[图片]` 时，使用对应的消息 `id` 调用此工具。
+   - 默认模式：返回解密后图片的本地物理绝对路径（缓存至 `~/.wechat_mcp/images/`），**杜绝因大图 Base64 直接撑爆 Agent 上下文**；
+   - 多模态看图模式：如当前 Agent 需要视觉看图分析，可设置 `include_base64=True` 提取 Base64 字符串供模型理解。
+5. `search_shared_files(keyword="...", limit=20)`: 定位群内或私聊传输的文件路径。
 
 #### 钉钉 (dingtalk) 推荐调用顺序：
 1. `list_dingtalk_conversations(limit=20)`: 获取最近群聊与私聊列表（已自动映射最新实名及群名）。
@@ -87,7 +90,42 @@ wechat-init
 
 ---
 
-### 2.3 任务结束后：数据隐私与存储清理 (Post-flight Cleanup)
+### 2.3 版本升级与更新维护 (Project Upgrade & Version Maintenance)
+
+当用户提出“更新 im-mcp”、“升级微信/钉钉 MCP”、“拉取最新修复”或发现新特性/Bug 修复发布时，智能体应根据当前的安装方式执行平滑升级：
+
+#### 1. 全局持久化安装模式下的升级（推荐）：
+如果用户此前采用 `uv tool install` 进行安装，使用 `uv tool update` 或重新指定 Git 仓库升级：
+```bash
+# 标准全局一键更新
+uv tool upgrade im-mcp
+
+# 或强制以最新远程仓库版本重新覆盖安装（支持最新 Git HEAD）
+uv tool install --force "git+https://github.com/stkoecn/im-mcp.git" --with "im-mcp[all]"
+
+# 国内网络环境（Gitee 源）
+uv tool install --force "git+https://gitee.com/ws4m/im-mcp.git" --with "im-mcp[all]"
+```
+
+#### 2. 即席运行模式 (`uvx`)：
+如果是在沙箱中通过 `uvx` 运行，`uvx` 默认可能缓存旧版本 Wheel。执行升级或强制刷新版本缓存：
+```bash
+# 清理 uvx 临时工具缓存以确保拉取最新 Git 代码
+uv cache clean im-mcp
+
+# 或在下一次调用 uvx 时追加 --refresh 参数强制拉取最新版本
+uvx --refresh --from "git+https://github.com/stkoecn/im-mcp.git[all]" <command>
+```
+
+#### 3. 升级后平滑重新加载：
+升级完成后，智能体应主动提醒用户刷新或重新加载客户端，以加载最新版本的 MCP 服务定义与工具集：
+- **Pi / Pebrel**：提示输入 `/reload`；
+- **Claude Desktop / Cursor / WorkBuddy**：提示重启客户端或重新连接 MCP 服务器；
+- 如本次升级涉及底层数据库清洗逻辑变更，可执行 `wechat-init --etl-only` 在 2 秒内无损重建最新 FTS 索引，无需耗时重新提取或解密。
+
+---
+
+### 2.4 任务结束后：数据隐私与存储清理 (Post-flight Cleanup)
 
 在完成周报、工时汇总或用户明确要求“清理环境”、“删除导出的聊天记录”时，**智能体应主动调用 `im-clean`**：
 
@@ -114,7 +152,7 @@ im-clean --scope wechat -y
 im-clean --scope dingtalk -y
 ```
 
-### 2.4 完全卸载与客户端清理协同 (Full Uninstallation Guidance)
+### 2.5 完全卸载与客户端清理协同 (Full Uninstallation Guidance)
 
 当用户明确提出“完全卸载这个 MCP”、“彻底删除聊天工具及配置”时，智能体应协助用户完成以下层级的标准顺序清理，并**主动告知用户哪些步骤需要其在客户端界面手动操作**：
 
