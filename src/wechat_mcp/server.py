@@ -84,13 +84,14 @@ def _escape_like(value: str) -> str:
 def _dedupe_phrases(phrases, min_count: int = 3, scan: int = 200, limit: int = 20) -> List[Dict[str, Any]]:
     """把 n-gram 计数整理成短语列表，并过滤被更长短语完全覆盖的碎片。
 
-    2 字短语语义相对独立，保留；3-4 字短语若被同频或更高频的长短语包含，
-    视为碎片丢弃（例如「算力和」被「算力和数」覆盖）。
+    只要存在一个更长的短语完整包含当前短语、且其计数不低于当前计数，
+    当前短语就视为 n-gram 碎片而丢弃（如「猫老」被「猫老板」覆盖、
+    「算力和」被「算力和数」覆盖）。计数更高的短词说明有独立用法，予以保留。
     """
     ranked = [(p, c) for p, c in phrases.most_common(scan) if c >= min_count]
     result: List[Dict[str, Any]] = []
     for phrase, count in ranked:
-        if len(phrase) > 2 and any(
+        if any(
             other != phrase and phrase in other and other_count >= count
             for other, other_count in ranked
         ):
