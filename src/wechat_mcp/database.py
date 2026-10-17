@@ -1,19 +1,38 @@
 import sqlite3
 import re
 import hashlib
+import threading
 from pathlib import Path
 import logging
 
 from .config import DB_PATH, get_decrypted_dir
 from .adapters import route_sync
+from .adapters.media import sync_emoticons_v4, sync_favorites_v4, sync_media_v4
 
 logger = logging.getLogger(__name__)
+
+# 线程本地连接登记：工具函数退出时统一释放，保证异常路径也不会泄漏连接
+_conn_tls = threading.local()
+
+
+def release_connections() -> None:
+    """关闭当前线程已打开的全部数据库连接（可重复调用，close 幂等）"""
+    for conn in getattr(_conn_tls, "conns", []):
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _conn_tls.conns = []
+
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    if not hasattr(_conn_tls, "conns"):
+        _conn_tls.conns = []
+    _conn_tls.conns.append(conn)
     return conn
 
 def init_schema():
@@ -77,6 +96,44 @@ def init_schema():
         CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
         END;
+
+        CREATE TABLE IF NOT EXISTS media_files (
+            md5 TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            file_name TEXT,
+            file_size INTEGER,
+            modify_time INTEGER,
+            chat_hash TEXT,
+            month TEXT,
+            rel_path TEXT,
+            abs_path TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_media_kind ON media_files(kind);
+        CREATE INDEX IF NOT EXISTS idx_media_month ON media_files(month);
+
+        CREATE TABLE IF NOT EXISTS favorites (
+            local_id INTEGER PRIMARY KEY,
+            type INTEGER,
+            update_time INTEGER,
+            title TEXT,
+            description TEXT,
+            from_user TEXT,
+            raw_content TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS emoticons (
+            md5 TEXT PRIMARY KEY,
+            caption TEXT,
+            package_id TEXT,
+            package_name TEXT,
+            kind TEXT,
+            thumb_url TEXT,
+            cdn_url TEXT,
+            designer_id TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_emoticons_package ON emoticons(package_id);
     """)
     conn.commit()
     conn.close()
@@ -92,6 +149,21 @@ def compute_fingerprint(decrypted_dir: Path) -> str:
             pass
     return hashlib.md5("\n".join(items).encode()).hexdigest()
 
+def _collect_stats(cur: sqlite3.Cursor) -> dict:
+    """统计中间库当前的数据量（供 CLI 与 MCP 工具返回真实数量）"""
+    def count(table: str) -> int:
+        try:
+            return cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        except sqlite3.Error:
+            return 0
+
+    return {
+        "contacts": count("contacts"),
+        "sessions": count("sessions"),
+        "messages": count("messages"),
+    }
+
+
 def sync_data(force: bool = False) -> dict:
     """将解密后的 sqlite 数据同步到统一中间库"""
     decrypted_dir = get_decrypted_dir()
@@ -106,11 +178,18 @@ def sync_data(force: bool = False) -> dict:
     cur.execute("SELECT value FROM meta WHERE key='fingerprint'")
     row = cur.fetchone()
     if not force and row and row[0] == fp:
+        stats = _collect_stats(cur)
         conn.close()
-        return {"status": "skipped", "message": "No new database changes"}
+        return {"status": "skipped", "message": "No new database changes", **stats}
 
     # 按版本路由执行解密数据库同步 (v3 / v4 / 扩展版本)
     adapter_used = route_sync(decrypted_dir, cur)
+
+    # 媒体文件索引与收藏条目（绿泡泡 4.x 的独立数据库）
+    if adapter_used in ("v4", "fallback"):
+        sync_media_v4(decrypted_dir, cur)
+        sync_favorites_v4(decrypted_dir, cur)
+        sync_emoticons_v4(decrypted_dir, cur)
 
     # 更新会话统计与 FTS 索引
     cur.execute("""
@@ -121,5 +200,11 @@ def sync_data(force: bool = False) -> dict:
 
     cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('fingerprint', ?)", (fp,))
     conn.commit()
+    stats = _collect_stats(cur)
     conn.close()
-    return {"status": "success", "message": f"Database synchronized successfully (adapter: {adapter_used})"}
+    return {
+        "status": "success",
+        "message": f"Database synchronized successfully (adapter: {adapter_used})",
+        "adapter": adapter_used,
+        **stats,
+    }
