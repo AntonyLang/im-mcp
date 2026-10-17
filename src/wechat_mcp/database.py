@@ -92,6 +92,21 @@ def compute_fingerprint(decrypted_dir: Path) -> str:
             pass
     return hashlib.md5("\n".join(items).encode()).hexdigest()
 
+def _collect_stats(cur: sqlite3.Cursor) -> dict:
+    """统计中间库当前的数据量（供 CLI 与 MCP 工具返回真实数量）"""
+    def count(table: str) -> int:
+        try:
+            return cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        except sqlite3.Error:
+            return 0
+
+    return {
+        "contacts": count("contacts"),
+        "sessions": count("sessions"),
+        "messages": count("messages"),
+    }
+
+
 def sync_data(force: bool = False) -> dict:
     """将解密后的 sqlite 数据同步到统一中间库"""
     decrypted_dir = get_decrypted_dir()
@@ -106,8 +121,9 @@ def sync_data(force: bool = False) -> dict:
     cur.execute("SELECT value FROM meta WHERE key='fingerprint'")
     row = cur.fetchone()
     if not force and row and row[0] == fp:
+        stats = _collect_stats(cur)
         conn.close()
-        return {"status": "skipped", "message": "No new database changes"}
+        return {"status": "skipped", "message": "No new database changes", **stats}
 
     # 按版本路由执行解密数据库同步 (v3 / v4 / 扩展版本)
     adapter_used = route_sync(decrypted_dir, cur)
@@ -121,5 +137,11 @@ def sync_data(force: bool = False) -> dict:
 
     cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('fingerprint', ?)", (fp,))
     conn.commit()
+    stats = _collect_stats(cur)
     conn.close()
-    return {"status": "success", "message": f"Database synchronized successfully (adapter: {adapter_used})"}
+    return {
+        "status": "success",
+        "message": f"Database synchronized successfully (adapter: {adapter_used})",
+        "adapter": adapter_used,
+        **stats,
+    }
