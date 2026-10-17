@@ -1,14 +1,12 @@
 import datetime
 import re
 import sqlite3
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .config import DB_PATH, BASE_DIR
+from .config import DB_PATH
 from .database import get_connection, sync_data
 
 # 初始化 FastMCP 服务器
@@ -179,9 +177,10 @@ def list_wechat_sessions(keyword: Optional[str] = None, session_type: Optional[s
     sql = "SELECT username, type, display_name, message_count, last_time, last_msg_preview FROM sessions WHERE 1=1"
     params = []
     
-    if keyword:
-        sql += " AND (display_name LIKE ? OR username LIKE ?)"
-        params.extend([f"%{keyword}%", f"%{keyword}%"])
+    if keyword and keyword.strip():
+        kw = f"%{_escape_like(keyword.strip())}%"
+        sql += " AND (display_name LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\')"
+        params.extend([kw, kw])
     if session_type:
         sql += " AND type = ?"
         params.append(session_type)
@@ -278,9 +277,9 @@ def search_shared_files(keyword: Optional[str] = None, session_id: Optional[str]
     """
     params = []
     
-    if keyword:
-        sql += " AND m.content LIKE ?"
-        params.append(f"%{keyword}%")
+    if keyword and keyword.strip():
+        sql += " AND m.content LIKE ? ESCAPE '\\'"
+        params.append(f"%{_escape_like(keyword.strip())}%")
     if session_id:
         sql += " AND m.session_username = ?"
         params.append(session_id)
@@ -714,8 +713,12 @@ def get_sync_status() -> Dict[str, Any]:
     cur = conn.cursor()
 
     def _one(query: str) -> int:
-        row = cur.execute(query).fetchone()
-        return row[0] if row and row[0] is not None else 0
+        try:
+            row = cur.execute(query).fetchone()
+            return row[0] if row and row[0] is not None else 0
+        except sqlite3.Error:
+            # 旧版本数据库可能缺少后续版本新增的表，此处容错为 0
+            return 0
 
     counts = {
         "messages": _one("SELECT COUNT(*) FROM messages"),
