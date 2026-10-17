@@ -13,7 +13,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from .key_tool import main as key_tool_main, auto_detect_db_dir, cmd_extract
+from .key_tool import main as key_tool_main, auto_detect_db_dir, cmd_extract, save_passphrase
 from ..database import sync_data
 from ..config import DEFAULT_DECRYPTED_DIR, USER_WECHAT_DIR
 
@@ -37,6 +37,10 @@ def main() -> None:
         "--keys",
         default=str(USER_WECHAT_DIR / "all_keys.json"),
         help=f"密钥保存文件名 (默认: {USER_WECHAT_DIR / 'all_keys.json'})",
+    )
+    parser.add_argument(
+        "--passphrase",
+        help="绿泡泡 4.1+ 密钥派生口令（64位十六进制，若提供则自动保存并用于解密）",
     )
     parser.add_argument(
         "--only-extract",
@@ -96,10 +100,18 @@ def main() -> None:
         verbose=args.verbose,
     )
 
+    if args.passphrase:
+        ph = args.passphrase.strip().lower()
+        if len(ph) != 64 or not all(c in "0123456789abcdef" for c in ph):
+            print("[ERROR] passphrase 必须是 64 位十六进制字符串（32 字节）")
+            sys.exit(1)
+        save_passphrase(ph)
+        print("[+] 已成功保存 passphrase。")
+
     print("=" * 60)
-    print("🚀 绿泡泡数据库初始化向导 (wechat-init)")
+    print(f"🚀 绿泡泡数据库初始化向导 ({sys.platform}) (wechat-init)")
     print("=" * 60)
-    print(f"[*] 提示: 请确保 Windows 绿泡泡客户端已正常启动并完成登录。")
+    print(f"[*] 提示: 请确保当前设备上绿泡泡客户端已正常运行。")
     print(f"[*] 解密输出目录: {output_dir}")
     print(f"[*] 密钥文件: {args.keys}")
     print("-" * 60)
@@ -127,14 +139,14 @@ def main() -> None:
         err_msg = str(e)
         print(f"\n[ERROR] 提取或解密失败: {err_msg}")
         # 分场景精准归因，避免误导用户排查
-        if "Weixin.exe" in err_msg or "进程" in err_msg:
-            print("[*] 提示: 未能定位或连接到绿泡泡进程，请确认 Windows 绿泡泡客户端已登录运行。")
+        if "Weixin.exe" in err_msg or "WeChat" in err_msg or "进程" in err_msg:
+            print("[*] 提示: 未能定位或连接到绿泡泡进程，请确认客户端已登录运行。")
         elif "Access Denied" in err_msg or "权限" in err_msg or "privilege" in err_msg.lower():
-            print("[*] 提示: 读取绿泡泡进程内存需要提权，请尝试以管理员身份运行当前终端！")
+            print("[*] 提示: 访问相关资源需要提权，请尝试以管理员/sudo身份运行当前终端！")
         elif "db_storage" in err_msg or "目录" in err_msg:
             print("[*] 提示: 未检测到绿泡泡数据库目录，请确认绿泡泡数据存储位置或通过 --db-dir 手动指定。")
         else:
-            print("[*] 提示: 执行过程中遇到程序内部异常，请检查上方详细错误信息或向作者提交 issue。")
+            print("[*] 提示: 执行过程中遇到程序内部异常，请检查上方详细错误信息。")
         sys.exit(1)
 
 

@@ -62,7 +62,7 @@ PASSPHRASE_FILE = os.path.join(os.path.expanduser("~"), ".wcdb-key-tool", "wecha
 
 
 # ============================================================
-# AES-CBC via Windows CNG (bcrypt.dll，系统自带，无需第三方依赖)
+# AES-CBC via OS Native Cryptography (Zero 3rd-party dependencies)
 # ============================================================
 
 if sys.platform == "win32":
@@ -81,39 +81,92 @@ if sys.platform == "win32":
         ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong,
     ]
 
-
-def aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
-    """AES-256-CBC 解密（无 padding），走 CNG 的 bcrypt.dll。"""
-    h_alg = wt.HANDLE()
-    status = _bcrypt.BCryptOpenAlgorithmProvider(ctypes.byref(h_alg), "AES", None, 0)
-    if status != 0:
-        raise RuntimeError(f"BCryptOpenAlgorithmProvider failed: {status:#x}")
-    try:
-        mode = ("ChainingModeCBC\x00").encode("utf-16-le")
-        status = _bcrypt.BCryptSetProperty(h_alg, "ChainingMode", mode, len(mode), 0)
+    def aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+        """AES-256-CBC 解密（无 padding），走 Windows CNG 的 bcrypt.dll。"""
+        h_alg = wt.HANDLE()
+        status = _bcrypt.BCryptOpenAlgorithmProvider(ctypes.byref(h_alg), "AES", None, 0)
         if status != 0:
-            raise RuntimeError(f"BCryptSetProperty failed: {status:#x}")
-
-        h_key = wt.HANDLE()
-        status = _bcrypt.BCryptGenerateSymmetricKey(h_alg, ctypes.byref(h_key), None, 0, key, len(key), 0)
-        if status != 0:
-            raise RuntimeError(f"BCryptGenerateSymmetricKey failed: {status:#x}")
+            raise RuntimeError(f"BCryptOpenAlgorithmProvider failed: {status:#x}")
         try:
-            iv_buf = ctypes.create_string_buffer(iv, len(iv))
-            out_buf = ctypes.create_string_buffer(len(data))
-            result_len = ctypes.c_ulong(0)
-            status = _bcrypt.BCryptDecrypt(
-                h_key, data, len(data), None,
-                iv_buf, len(iv),
-                out_buf, len(out_buf), ctypes.byref(result_len), 0,
-            )
+            mode = ("ChainingModeCBC\x00").encode("utf-16-le")
+            status = _bcrypt.BCryptSetProperty(h_alg, "ChainingMode", mode, len(mode), 0)
             if status != 0:
-                raise RuntimeError(f"BCryptDecrypt failed: {status:#x}")
-            return out_buf.raw[: result_len.value]
+                raise RuntimeError(f"BCryptSetProperty failed: {status:#x}")
+
+            h_key = wt.HANDLE()
+            status = _bcrypt.BCryptGenerateSymmetricKey(h_alg, ctypes.byref(h_key), None, 0, key, len(key), 0)
+            if status != 0:
+                raise RuntimeError(f"BCryptGenerateSymmetricKey failed: {status:#x}")
+            try:
+                iv_buf = ctypes.create_string_buffer(iv, len(iv))
+                out_buf = ctypes.create_string_buffer(len(data))
+                result_len = ctypes.c_ulong(0)
+                status = _bcrypt.BCryptDecrypt(
+                    h_key, data, len(data), None,
+                    iv_buf, len(iv),
+                    out_buf, len(out_buf), ctypes.byref(result_len), 0,
+                )
+                if status != 0:
+                    raise RuntimeError(f"BCryptDecrypt failed: {status:#x}")
+                return out_buf.raw[: result_len.value]
+            finally:
+                _bcrypt.BCryptDestroyKey(h_key)
         finally:
-            _bcrypt.BCryptDestroyKey(h_key)
-    finally:
-        _bcrypt.BCryptCloseAlgorithmProvider(h_alg, 0)
+            _bcrypt.BCryptCloseAlgorithmProvider(h_alg, 0)
+
+elif sys.platform == "darwin":
+    import ctypes.util
+
+    _libSystem = ctypes.CDLL(ctypes.util.find_library("System"))
+    _libSystem.CCCrypt.argtypes = [
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    _libSystem.CCCrypt.restype = ctypes.c_int32
+
+    _kCCDecrypt = 1
+    _kCCAlgorithmAES = 0
+
+    def aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+        """AES-256-CBC 解密（无 padding），走 macOS CommonCrypto 的 CCCrypt。"""
+        out_buf = ctypes.create_string_buffer(len(data) + 32)
+        out_len = ctypes.c_size_t(0)
+        status = _libSystem.CCCrypt(
+            _kCCDecrypt, _kCCAlgorithmAES, 0,
+            key, len(key),
+            iv,
+            data, len(data),
+            out_buf, len(out_buf),
+            ctypes.byref(out_len),
+        )
+        if status != 0:
+            raise RuntimeError(f"CCCrypt 解密失败: status={status}")
+        return out_buf.raw[: out_len.value]
+
+else:
+    # Linux 或其他平台尝试使用 OpenSSL (libcrypto)
+    import ctypes.util
+
+    _libcrypto_path = ctypes.util.find_library("crypto")
+    if _libcrypto_path:
+        _libcrypto = ctypes.CDLL(_libcrypto_path)
+        # EVP_CIPHER_CTX 接口或 ctypes 回退
+        def aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+            try:
+                from Crypto.Cipher import AES
+                cipher = AES.new(key, AES.MODE_CBC, iv)
+                return cipher.decrypt(data)
+            except ImportError:
+                raise RuntimeError("非 Windows/macOS 平台请安装 pycryptodome: pip install pycryptodome")
+    else:
+        def aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+            from Crypto.Cipher import AES
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            return cipher.decrypt(data)
 
 
 # ============================================================
@@ -783,31 +836,40 @@ def _save_results(db_files: list, salt_to_dbs: dict, key_map: dict, db_dir: str,
 # ============================================================
 
 def auto_detect_db_dir() -> str | None:
-    """读取 %APPDATA%\\Tencent\\xwechat\\config\\*.ini 找到数据根目录，
-    再匹配 xwechat_files\\*\\db_storage。"""
-    appdata = os.environ.get("APPDATA", "")
-    config_dir = os.path.join(appdata, "Tencent", "xwechat", "config")
-    if not os.path.isdir(config_dir):
-        return None
-
-    data_roots: list[str] = []
-    for ini_file in glob.glob(os.path.join(config_dir, "*.ini")):
-        content = None
-        for enc in ("utf-8", "gbk"):
-            try:
-                with open(ini_file, "r", encoding=enc) as f:
-                    content = f.read(1024).strip()
-                break
-            except UnicodeDecodeError:
-                continue
-        if content and os.path.isdir(content):
-            data_roots.append(content)
-
+    """自动检测绿泡泡 db_storage 目录。
+    Windows: 读取 %APPDATA%\\Tencent\\xwechat\\config\\*.ini 找到数据根目录，再匹配 xwechat_files\\*\\db_storage。
+    macOS: 扫描 ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/db_storage。
+    """
     candidates: list[str] = []
-    for root in data_roots:
-        for match in glob.glob(os.path.join(root, "xwechat_files", "*", "db_storage")):
-            if os.path.isdir(match) and match not in candidates:
-                candidates.append(match)
+
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        config_dir = os.path.join(appdata, "Tencent", "xwechat", "config")
+        data_roots: list[str] = []
+        if os.path.isdir(config_dir):
+            for ini_file in glob.glob(os.path.join(config_dir, "*.ini")):
+                content = None
+                for enc in ("utf-8", "gbk"):
+                    try:
+                        with open(ini_file, "r", encoding=enc) as f:
+                            content = f.read(1024).strip()
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                if content and os.path.isdir(content):
+                    data_roots.append(content)
+
+        for root in data_roots:
+            for match in glob.glob(os.path.join(root, "xwechat_files", "*", "db_storage")):
+                if os.path.isdir(match) and match not in candidates:
+                    candidates.append(match)
+
+    elif sys.platform == "darwin":
+        mac_files = os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+        if os.path.isdir(mac_files):
+            for match in glob.glob(os.path.join(mac_files, "*", "db_storage")):
+                if os.path.isdir(match) and match not in candidates:
+                    candidates.append(match)
 
     return candidates[0] if candidates else None
 
@@ -872,7 +934,7 @@ def _decrypt_database(db_path: str, out_path: str, enc_key: bytes) -> bool:
 
 def decrypt_all(db_dir: str, out_dir: str, keys_file: str) -> dict:
     _print("=" * 60)
-    _print("  WeChat 数据库解密器 (Windows)")
+    _print(f"  WeChat 数据库解密器 ({sys.platform})")
     _print("=" * 60)
 
     if not os.path.exists(keys_file):
@@ -959,8 +1021,13 @@ def cmd_extract(args: argparse.Namespace) -> None:
             return
         _print("[!] 已保存的 passphrase 无效，改走内存扫描")
 
-    # 第 2 级：内存扫描 raw key（仅对仍缓存明文密钥的绿泡泡版本有效）
-    _scan_memory_raw_key(db_dir, out_file)
+    # 第 2 级：内存扫描 raw key（仅对仍缓存明文密钥的绿泡泡老版本有效，Windows/Linux 支持）
+    if sys.platform == "win32":
+        _scan_memory_raw_key(db_dir, out_file)
+    else:
+        _print(f"[*] 当前平台 ({sys.platform}) 微信 4.1+ 需配置 passphrase。")
+        _print("    请使用 `wechat-init set-passphrase <64位hex>` 或配置 wechat-passphrase.json")
+        sys.exit(1)
     if args.decrypt:
         decrypted_dir = getattr(args, "decrypted_dir", "decrypted") or "decrypted"
         decrypt_all(db_dir, decrypted_dir, out_file)
@@ -1010,22 +1077,23 @@ def cmd_decrypt(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="wcdb-key-tool (Windows) — 绿泡泡数据库密钥提取工具")
+    parser = argparse.ArgumentParser(description=f"wcdb-key-tool ({sys.platform}) — 绿泡泡数据库密钥提取与解密工具")
     parser.add_argument("--verbose", "-v", action="store_true")
     sub = parser.add_subparsers(dest="command", metavar="command")
     sub.required = True
 
-    extract_cmd = sub.add_parser("extract", help="提取数据库密钥（老版本内存扫描 / 新版 runtime Config.Cipher 扫描）")
+    extract_cmd = sub.add_parser("extract", help="提取数据库密钥（支持 passphrase PBKDF2 派生 / 老版本内存扫描）")
     extract_cmd.add_argument("--db-dir", help="绿泡泡 db_storage 目录（默认自动检测）")
     extract_cmd.add_argument("--output", default="all_keys.json")
     extract_cmd.add_argument("--decrypt", action="store_true")
 
-    capture_cmd = sub.add_parser(
-        "capture-experimental",
-        help="[研究性备用] 断点捕获 passphrase，见文件头说明",
-    )
-    capture_cmd.add_argument("--pid", type=int, help="绿泡泡进程 PID（默认自动查找）")
-    capture_cmd.add_argument("--timeout", type=int, default=DEFAULT_CDB_TIMEOUT)
+    if sys.platform == "win32":
+        capture_cmd = sub.add_parser(
+            "capture-experimental",
+            help="[研究性备用] 断点捕获 passphrase，见文件头说明",
+        )
+        capture_cmd.add_argument("--pid", type=int, help="绿泡泡进程 PID（默认自动查找）")
+        capture_cmd.add_argument("--timeout", type=int, default=DEFAULT_CDB_TIMEOUT)
 
     passphrase_cmd = sub.add_parser("set-passphrase", help="手动填入通过其他手段获取的 passphrase")
     passphrase_cmd.add_argument("passphrase", help="64 位十六进制字符串（32 字节）")

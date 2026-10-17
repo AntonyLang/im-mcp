@@ -20,6 +20,30 @@ DB_PATH = USER_WECHAT_DIR / "app.db"
 # 确保家目录存在
 USER_WECHAT_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def get_default_storage_dir() -> Path | None:
+    """自动获取当前操作系统平台下的微信原始数据存储根目录"""
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        config_dir = os.path.join(appdata, "Tencent", "xwechat", "config")
+        if os.path.isdir(config_dir):
+            import glob
+            for ini_file in glob.glob(os.path.join(config_dir, "*.ini")):
+                for enc in ("utf-8", "gbk"):
+                    try:
+                        with open(ini_file, "r", encoding=enc) as f:
+                            c = f.read(1024).strip()
+                        if c and os.path.isdir(c):
+                            return Path(c)
+                    except Exception:
+                        pass
+    elif sys.platform == "darwin":
+        mac_container = Path.home() / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data" / "Documents" / "xwechat_files"
+        if mac_container.is_dir():
+            return mac_container
+    return None
+
+
 # 解密数据库目录（优先环境变量，其次全局家目录 ~/.wechat_mcp/decrypted，最后兼容当前项目相对路径）
 def get_decrypted_dir() -> Path:
     env_dir = os.environ.get("WECHAT_DECRYPTED_DIR")
