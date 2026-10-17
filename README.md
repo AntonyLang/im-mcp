@@ -28,7 +28,7 @@
 
 | 平台 | 支持版本范围 | 实测验证版本 | 架构与平台 | 解密 / 同步原理 |
 |---|---|---|---|---|
-| **绿泡泡 (WeChat)** | **绿泡泡 4.x** 全系列<br>*(兼容 3.9.x)* | **`4.1.15.13`** (最新版)<br>`4.1.11.x` 等 | Windows x64 | 运行时扫描 `Weixin.exe` 进程内存的 Config.Cipher 动态提取 Salt 密钥，离线 HMAC 校验并解密 WCDB SQLite |
+| **绿泡泡 (WeChat)** | **绿泡泡 4.x** 全系列<br>*(兼容 3.9.x)* | **`4.1.15.13`** (Windows 最新版)<br>**`4.1.35.15`** (macOS 最新版)<br>`4.1.11.x` 等 | Windows x64<br>macOS (Apple Silicon & Intel) | **Windows**: 运行时扫描 `Weixin.exe` Config.Cipher 动态提取 Salt 密钥；<br>**macOS**: 原生 `CommonCrypto` (CCCrypt) 零额外依赖解密，支持 passphrase PBKDF2 派生；离线 HMAC 校验并解密 WCDB SQLite |
 | **DuangDuang (DingTalk)** | **DuangDuang 7.x** 全系列<br>*(涵盖 V2 与 V3)* | **`7.6.0.x`** (最新版)<br>`7.5.x` / `7.0.x` | Windows x64 / macOS | 纯离线读取用户目录 `user_config`，通过 PBKDF2-HMAC-SHA1 + MD5 推导 AES-128 密钥并合并 WAL 事务 |
 
 ---
@@ -127,15 +127,21 @@ pip install "git+https://github.com/stkoecn/im-mcp.git#egg=im-mcp[dingtalk]"
 安装本包后，系统会自动注册两个专用的命令行初始化向导。在日常使用 AI 客户端连接前，只需在控制台**运行一次**即可完成密钥提取与数据库初始化：
 
 ### 1. 绿泡泡一键初始化 (`wechat-init`)
-> **注意**：由于需要读取绿泡泡客户端内存（安全校验与运行时 Cipher 扫描），请确保**以管理员身份打开终端**，并且**Windows 绿泡泡已登录**。
+> **注意**：
+> - **Windows**：由于需要读取绿泡泡客户端内存（安全校验与运行时 Cipher 扫描），请确保**以管理员身份打开终端**，并且**Windows 绿泡泡已登录**。
+> - **macOS**：支持自动检测数据目录 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/db_storage`；微信 4.1+ 可通过 `--passphrase <64位hex>` 传入或由 `wechat-passphrase.json` 持久化，采用系统原生 `CommonCrypto` 完成 256,000 轮 PBKDF2 派生与全库零依赖极速解密。
 
 ```bash
-# 一键提取密钥、解密为 SQLite 并自动构建 FTS5 全文索引（默认保存至 ~/.wechat_mcp/）
+# Windows: 一键提取密钥、解密为 SQLite 并自动构建 FTS5 全文索引（默认保存至 ~/.wechat_mcp/）
 wechat-init
 
-# 高级选项（可选）
+# macOS (微信 4.1+ 配合 passphrase):
+wechat-init --passphrase <64位十六进制passphrase>
+
+# 高级选项（跨平台通用）
 wechat-init --output ~/.wechat_mcp/decrypted   # 指定解密数据库保存路径（默认 ~/.wechat_mcp/decrypted）
 wechat-init --only-extract                     # 仅提取密钥保存至 all_keys.json，不立即解密
+wechat-init --etl-only                         # 仅执行数据清洗与重构 FTS5 索引（无需重复解密）
 ```
 
 ### 2. DuangDuang一键初始化 (`dingtalk-init`)
