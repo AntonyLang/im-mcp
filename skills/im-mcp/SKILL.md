@@ -1,11 +1,11 @@
 ---
 name: im-mcp
-description: Windows 本地微信 (WeChat) 与钉钉 (DingTalk) 聊天记录、通讯录、群聊与文件检索 MCP 服务运维管理指南。当需要初始化离线数据库、提取微信解密密钥 (wechat-init)、离线同步钉钉数据库 (dingtalk-init)、检索聊天历史/周报/工时，或在一键彻底清理导出的解密数据与缓存 (im-clean) 时使用。
+description: Windows / macOS 本地微信 (WeChat) 与钉钉 (DingTalk) 聊天记录、通讯录、群聊与文件检索 MCP 服务运维管理指南。当需要初始化离线数据库、提取微信解密密钥 (wechat-init)、离线同步钉钉数据库 (dingtalk-init)、检索聊天历史/周报/工时，或在一键彻底清理导出的解密数据与缓存 (im-clean) 时使用。
 ---
 
 # IM-MCP 智能体运维与数据生命周期管理指南
 
-本技能指导智能体在 Windows 环境下管理 `im-mcp` 工具集（包含微信 MCP 与钉钉 MCP），涵盖**前置环境检查、离线数据库初始化与解密、聊天数据检索以及任务完成后的安全清理**。
+本技能指导智能体在 Windows 及 macOS 环境下管理 `im-mcp` 工具集（包含微信 MCP 与钉钉 MCP），涵盖**前置环境检查、离线数据库初始化与解密、聊天数据检索以及任务完成后的安全清理**。
 
 ---
 
@@ -32,7 +32,7 @@ uv tool install "git+https://github.com/stkoecn/im-mcp.git" --with "im-mcp[all]"
 
 | 命令 | 全局安装后调用方式 | 沙箱/受限环境 `uvx` 即席运行方式 | 适用场景 | 权限要求 | 关键产物 / 路径 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`wechat-init`** | `wechat-init` | `uvx --from "git+https://github.com/stkoecn/im-mcp.git[all]" wechat-init` | 提取微信 DBKey 并离线解密为 SQLite 数据库 | **需管理员权限** (读取微信内存) | `~/.wechat_mcp/decrypted/`, `~/.wechat_mcp/app.db` |
+| **`wechat-init`** | `wechat-init` | `uvx --from "git+https://github.com/stkoecn/im-mcp.git[all]" wechat-init` | 提取微信 DBKey 并离线解密为 SQLite 数据库 | Windows 需管理员权限 (扫内存)；macOS 支持 `--passphrase` 或配置持久化 | `~/.wechat_mcp/decrypted/`, `~/.wechat_mcp/app.db` |
 | **`dingtalk-init`** | `dingtalk-init` | `uvx --from "git+https://github.com/stkoecn/im-mcp.git[all]" dingtalk-init` | 离线提取钉钉密钥、解密 DB 并合并 WAL 事务 | 普通用户权限 | `~/.dingtalk_mcp/decrypted/dingtalk.db` |
 | **`im-clean`** | `im-clean` | `uvx --from "git+https://github.com/stkoecn/im-mcp.git[all]" im-clean` | 一键安全清理所有导出的明文数据、密钥与缓存 | 普通/管理员权限 | 清理上述两者的解密库及全局数据目录 |
 | **`wechat-mcp`** | `wechat-mcp` | `uvx --from "git+https://github.com/stkoecn/im-mcp.git[all]" wechat-mcp` | 微信 FastMCP 标准服务端入口 | 普通用户权限 | stdio 接口 |
@@ -56,15 +56,23 @@ dingtalk-init
 - **环境前置判断（禁止盲目扫描）**：若提示未找到数据目录或 UID，**禁止智能体自行在宿主机上漫无目的地递归深搜扫描进程或磁盘**。请直接暂停并向用户说明情况，询问并提醒用户确认钉钉客户端是否已在当前机器上登录。
 
 #### 微信数据库初始化 (WeChat)
-微信需要从正在运行的客户端进程内存中提取密钥并执行校验：
-```bash
-# 智能体执行初始化与全量解密
-wechat-init
-```
-- **微信运行前置检查（禁止盲目扫描）**：**微信客户端必须处于启动并已登录状态**。若微信未启动，`wechat-init` 会报错 `RuntimeError: Weixin.exe 未运行`。
-  - **重要约束**：**如果找不到微信进程，智能体切勿自行尝试猜测扫描系统无关进程或遍历目录！**
-  - **正确处置**：应立即主动向用户明确说明：“未能检测到正在运行的微信进程，请确认 Windows 微信客户端是否已登录就绪”。待用户准备好环境后再重新执行 `wechat-init`。
-- **权限判定**：若报错 `Access Denied` 或无法扫描内存，向用户说明原因并建议：“提取微信密钥需要扫描进程，请允许我以管理员身份执行终端命令，或请您在管理员 PowerShell 中运行一次 `wechat-init`”。
+微信需要密钥并对 WCDB 数据库执行解密与校验：
+- **Windows**：
+  ```bash
+  # Windows: 管理员身份运行
+  wechat-init
+  ```
+  微信需要从正在运行的客户端进程内存中提取密钥并执行校验。**微信客户端必须处于启动并已登录状态**。若微信未启动，`wechat-init` 会报错。
+- **macOS**：
+  ```bash
+  # macOS: 支持直接传入 64 位 passphrase
+  wechat-init --passphrase <64位十六进制passphrase>
+  ```
+  工具会自动定位 macOS 微信数据目录（`~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/db_storage`），调用系统原生 `CommonCrypto`（`CCCrypt`）派生密钥并完成解密。
+- **微信运行前置检查（禁止盲目扫描）**：
+  - **重要约束**：**如果找不到微信进程或缺少密钥原料，智能体切勿自行尝试猜测扫描系统无关进程或遍历系统全局目录！**
+  - **正确处置**：应主动向用户明确说明当前环境状态，引导用户准备环境或填入 passphrase。
+- **权限判定**：若 Windows 报错 `Access Denied`，向用户说明原因并建议以管理员身份执行。
 - **成功标志**：在用户数据目录 `~/.wechat_mcp/decrypted/` 下生成解密数据库，并在 `~/.wechat_mcp/app.db` 下完成 FTS5 索引清洗。若仅需重跑数据清洗与索引，可执行 `wechat-init --etl-only`。
 
 ---

@@ -28,7 +28,7 @@
 
 | 平台 | 支持版本范围 | 实测验证版本 | 架构与平台 | 解密 / 同步原理 |
 |---|---|---|---|---|
-| **绿泡泡 (WeChat)** | **绿泡泡 4.x** 全系列<br>*(兼容 3.9.x)* | **`4.1.15.13`** (最新版)<br>`4.1.11.x` 等 | Windows x64 | 运行时扫描 `Weixin.exe` 进程内存的 Config.Cipher 动态提取 Salt 密钥，离线 HMAC 校验并解密 WCDB SQLite |
+| **绿泡泡 (WeChat)** | **绿泡泡 4.x** 全系列<br>*(兼容 3.9.x)* | **`4.1.15.13`** (Windows 最新版)<br>**`4.1.35.15`** (macOS 最新版)<br>`4.1.11.x` 等 | Windows x64<br>macOS (Apple Silicon & Intel) | **Windows**: 运行时扫描 `Weixin.exe` Config.Cipher 动态提取 Salt 密钥；<br>**macOS**: 原生 `CommonCrypto` (CCCrypt) 零额外依赖解密，支持 passphrase PBKDF2 派生；离线 HMAC 校验并解密 WCDB SQLite |
 | **DuangDuang (DingTalk)** | **DuangDuang 7.x** 全系列<br>*(涵盖 V2 与 V3)* | **`7.6.0.x`** (最新版)<br>`7.5.x` / `7.0.x` | Windows x64 / macOS | 纯离线读取用户目录 `user_config`，通过 PBKDF2-HMAC-SHA1 + MD5 推导 AES-128 密钥并合并 WAL 事务 |
 
 ---
@@ -39,13 +39,22 @@
 
 | 工具名称 | 说明 | 适用场景 |
 |---|---|---|
-| `search_wechat_messages` | 全文检索聊天消息（支持限定人/群） | “找一下群里谁发过关于‘某某需求’的讨论” |
+| `search_wechat_messages` | 全文检索聊天消息（支持限定人/群，已支持分页 `offset`） | “找一下群里谁发过关于‘某某需求’的讨论” |
 | `list_wechat_sessions` | 查询群聊或联系人列表（获取唯一 ID） | “帮我看看关于‘量化’有哪些群” |
 | `get_session_history` | 获取指定会话的最近对话（时间正序） | “总结一下这个项目群最近 50 条消息都在聊什么” |
 | `search_shared_files` | 查找聊天中发送/接收的文件文档 | “找一下上周有人发在群里的那个理财报告 Excel” |
 | `get_message_image` | 按消息 ID 定位并按需解密聊天图片（支持本地文件路径或多模态 Base64） | “把刚才查到的那张聊天图片解密提取出来看下” |
 | `get_messages_by_date` | 按指定日期拉取全量或限定会话记录 | “帮我汇总 2026-10-16 那天的所有沟通做日报” |
 | `sync_wechat_database` | 触发增量提取与 ETL 同步 | “刚聊了几句，帮我更新一下数据库后再查” |
+| `search_contacts` | 快速搜索联系人（按昵称、备注或微信号） | “搜一下昵称叫‘老王’或者备注是‘供应商’的联系人” |
+| `list_chatroom_members` | 查询群聊成员清单并关联昵称备注 | “看看这个架构讨论群里都有哪些人” |
+| `get_messages_by_range` | 自定义起止时间段拉取消息（支持精确到时分秒跨天） | “查一下昨天下午两点到四点之间的讨论记录” |
+| `get_chat_activity_stats` | 统计会话或全量聊天活跃度（时段分布与发言 TOP） | “分析一下这个群平时什么时段最活跃，谁发言最多” |
+| `search_media_files` | 检索图片/视频/文件并返回磁盘绝对物理路径 | “找找上个月群里发过的所有设计图物理文件” |
+| `list_favorites` | 检索绿泡泡收藏夹条目（文本、链接、笔记等） | “翻一下我收藏夹里关于数据库优化的那篇文章” |
+| `list_emoticons` | 检索表情包索引（支持官方预设含义文字反查） | “查一下收藏的表情包或按文字找表情” |
+| `get_persona_style` | 人物语言风格蒸馏（高频短语、语气助词、典型样句画像） | “分析一下群友阿强的说话风格和常用口头禅” |
+| `get_sync_status` | 自检本地数据库规模、消息时间跨度与同步新鲜度 | “检查一下本地数据同步到了哪一天，共有多少条消息” |
 
 ### 2. DuangDuang (`dingtalk-mcp`)
 
@@ -127,15 +136,21 @@ pip install "git+https://github.com/stkoecn/im-mcp.git#egg=im-mcp[dingtalk]"
 安装本包后，系统会自动注册两个专用的命令行初始化向导。在日常使用 AI 客户端连接前，只需在控制台**运行一次**即可完成密钥提取与数据库初始化：
 
 ### 1. 绿泡泡一键初始化 (`wechat-init`)
-> **注意**：由于需要读取绿泡泡客户端内存（安全校验与运行时 Cipher 扫描），请确保**以管理员身份打开终端**，并且**Windows 绿泡泡已登录**。
+> **注意**：
+> - **Windows**：由于需要读取绿泡泡客户端内存（安全校验与运行时 Cipher 扫描），请确保**以管理员身份打开终端**，并且**Windows 绿泡泡已登录**。
+> - **macOS**：支持自动检测数据目录 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/db_storage`；微信 4.1+ 可通过 `--passphrase <64位hex>` 传入或由 `wechat-passphrase.json` 持久化，采用系统原生 `CommonCrypto` 完成 256,000 轮 PBKDF2 派生与全库零依赖极速解密。
 
 ```bash
-# 一键提取密钥、解密为 SQLite 并自动构建 FTS5 全文索引（默认保存至 ~/.wechat_mcp/）
+# Windows: 一键提取密钥、解密为 SQLite 并自动构建 FTS5 全文索引（默认保存至 ~/.wechat_mcp/）
 wechat-init
 
-# 高级选项（可选）
+# macOS (微信 4.1+ 配合 passphrase):
+wechat-init --passphrase <64位十六进制passphrase>
+
+# 高级选项（跨平台通用）
 wechat-init --output ~/.wechat_mcp/decrypted   # 指定解密数据库保存路径（默认 ~/.wechat_mcp/decrypted）
 wechat-init --only-extract                     # 仅提取密钥保存至 all_keys.json，不立即解密
+wechat-init --etl-only                         # 仅执行数据清洗与重构 FTS5 索引（无需重复解密）
 ```
 
 ### 2. DuangDuang一键初始化 (`dingtalk-init`)
