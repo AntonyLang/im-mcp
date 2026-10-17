@@ -1,6 +1,7 @@
 import sqlite3
 import re
 import hashlib
+import threading
 from pathlib import Path
 import logging
 
@@ -10,11 +11,28 @@ from .adapters.media import sync_emoticons_v4, sync_favorites_v4, sync_media_v4
 
 logger = logging.getLogger(__name__)
 
+# 线程本地连接登记：工具函数退出时统一释放，保证异常路径也不会泄漏连接
+_conn_tls = threading.local()
+
+
+def release_connections() -> None:
+    """关闭当前线程已打开的全部数据库连接（可重复调用，close 幂等）"""
+    for conn in getattr(_conn_tls, "conns", []):
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _conn_tls.conns = []
+
+
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    if not hasattr(_conn_tls, "conns"):
+        _conn_tls.conns = []
+    _conn_tls.conns.append(conn)
     return conn
 
 def init_schema():

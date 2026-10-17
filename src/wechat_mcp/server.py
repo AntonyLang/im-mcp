@@ -1,4 +1,5 @@
 import datetime
+import functools
 import re
 import sqlite3
 from pathlib import Path
@@ -7,10 +8,23 @@ from typing import Optional, List, Dict, Any
 from mcp.server.fastmcp import FastMCP
 
 from .config import DB_PATH
-from .database import get_connection, sync_data
+from .database import get_connection, release_connections, sync_data
 
 # 初始化 FastMCP 服务器
 mcp = FastMCP("wechat-mcp")
+
+
+def _db_tool(func):
+    """工具装饰器：无论正常返回还是抛异常，退出时都释放本线程的数据库连接"""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        finally:
+            release_connections()
+
+    return wrapper
 
 def _check_db_initialized() -> Optional[str]:
     """检查绿泡泡本地数据库与索引是否已初始化完成"""
@@ -101,6 +115,7 @@ def _dedupe_phrases(phrases, min_count: int = 3, scan: int = 200, limit: int = 2
 
 
 @mcp.tool()
+@_db_tool
 def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
     """全文搜索绿泡泡聊天记录。
 
@@ -160,6 +175,7 @@ def search_wechat_messages(query: str, session_id: Optional[str] = None, limit: 
     return results
 
 @mcp.tool()
+@_db_tool
 def list_wechat_sessions(keyword: Optional[str] = None, session_type: Optional[str] = None, limit: int = 30) -> List[Dict[str, Any]]:
     """查询绿泡泡会话列表（用于查找特定联系人或群聊的唯一 ID）。
     
@@ -203,6 +219,7 @@ def list_wechat_sessions(keyword: Optional[str] = None, session_type: Optional[s
     return results
 
 @mcp.tool()
+@_db_tool
 def get_session_history(session_id: str, limit: int = 50, days: Optional[int] = None) -> List[Dict[str, Any]]:
     """获取指定群聊或联系人的聊天记录（按时间正序排列，适合上下文理解与总结）。
     
@@ -252,6 +269,7 @@ def get_session_history(session_id: str, limit: int = 50, days: Optional[int] = 
     return results
 
 @mcp.tool()
+@_db_tool
 def search_shared_files(keyword: Optional[str] = None, session_id: Optional[str] = None, limit: int = 30) -> List[Dict[str, Any]]:
     """查找绿泡泡聊天中传输的文件（如 PDF、Excel、Word 等文档记录）。
     
@@ -301,6 +319,7 @@ def search_shared_files(keyword: Optional[str] = None, session_id: Optional[str]
     return results
 
 @mcp.tool()
+@_db_tool
 def get_messages_by_date(date: str, session_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
     """按指定单日（YYYY-MM-DD）查询聊天记录（用于日报分析、事件回溯等）。
     
@@ -358,6 +377,7 @@ def get_messages_by_date(date: str, session_id: Optional[str] = None, limit: int
     return results
 
 @mcp.tool()
+@_db_tool
 def sync_wechat_database(force: bool = False) -> Dict[str, Any]:
     """触发数据导入同步，使本地 MCP 数据库保持最新状态。
     
@@ -370,6 +390,7 @@ def sync_wechat_database(force: bool = False) -> Dict[str, Any]:
     }
 
 @mcp.tool()
+@_db_tool
 def search_contacts(keyword: str, limit: int = 30) -> List[Dict[str, Any]]:
     """搜索绿泡泡联系人（按昵称 / 备注 / 微信号匹配）。
 
@@ -404,6 +425,7 @@ def search_contacts(keyword: str, limit: int = 30) -> List[Dict[str, Any]]:
     ]
 
 @mcp.tool()
+@_db_tool
 def list_chatroom_members(chatroom_id: str, keyword: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
     """列出指定群聊的成员名单（自动关联联系人昵称与微信号）。
 
@@ -465,6 +487,7 @@ def list_chatroom_members(chatroom_id: str, keyword: Optional[str] = None, limit
     }
 
 @mcp.tool()
+@_db_tool
 def get_messages_by_range(start: str, end: str, session_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
     """按自定义时间范围查询聊天记录（支持跨天与任意时段，比按单日查询更灵活）。
 
@@ -516,6 +539,7 @@ def get_messages_by_range(start: str, end: str, session_id: Optional[str] = None
     ]
 
 @mcp.tool()
+@_db_tool
 def get_chat_activity_stats(session_id: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, Any]:
     """统计聊天活跃度：消息总量、按小时与按天分布、发言最多的人。
 
@@ -585,6 +609,7 @@ def get_chat_activity_stats(session_id: Optional[str] = None, start: Optional[st
     }
 
 @mcp.tool()
+@_db_tool
 def search_media_files(keyword: Optional[str] = None, kind: Optional[str] = None, month: Optional[str] = None, limit: int = 30) -> List[Dict[str, Any]]:
     """查找聊天中传输过的图片 / 文件 / 视频，并返回其磁盘路径。
 
@@ -635,6 +660,7 @@ def search_media_files(keyword: Optional[str] = None, kind: Optional[str] = None
     ]
 
 @mcp.tool()
+@_db_tool
 def list_favorites(keyword: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
     """查询绿泡泡收藏条目（标题 / 描述 / 来源）。
 
@@ -672,6 +698,7 @@ def list_favorites(keyword: Optional[str] = None, limit: int = 20) -> List[Dict[
     ]
 
 @mcp.tool()
+@_db_tool
 def list_emoticons(keyword: Optional[str] = None, package: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     """列出绿泡泡表情包与表情（含官方文字说明）。
 
@@ -704,6 +731,7 @@ def list_emoticons(keyword: Optional[str] = None, package: Optional[str] = None,
     return [dict(r) for r in rows]
 
 @mcp.tool()
+@_db_tool
 def get_sync_status() -> Dict[str, Any]:
     """查看本地索引的数据新鲜度与规模，判断是否需要重新运行 wechat-init 同步新消息。"""
     err = _check_db_initialized()
@@ -741,6 +769,7 @@ def get_sync_status() -> Dict[str, Any]:
     }
 
 @mcp.tool()
+@_db_tool
 def get_persona_style(sender: str, session_id: Optional[str] = None, sample_limit: int = 300) -> Dict[str, Any]:
     """分析某位联系人的沟通风格（统计画像 + 高频用语 + 典型语句），可用于风格蒸馏。
 
