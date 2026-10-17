@@ -562,6 +562,93 @@ def get_chat_activity_stats(session_id: Optional[str] = None, start: Optional[st
         ],
     }
 
+@mcp.tool()
+def search_media_files(keyword: Optional[str] = None, kind: Optional[str] = None, month: Optional[str] = None, limit: int = 30) -> List[Dict[str, Any]]:
+    """查找聊天中传输过的图片 / 文件 / 视频，并返回其磁盘路径。
+
+    Args:
+        keyword: 可选，按文件名关键字搜索
+        kind: 可选，类型筛选：image（图片）、file（文件）、video（视频）
+        month: 可选，按月份筛选，格式 'YYYY-MM'
+        limit: 返回数量，默认 30
+    """
+    err = _check_db_initialized()
+    if err:
+        return [{"error": err}]
+    conn = get_connection()
+    cur = conn.cursor()
+
+    sql = """
+        SELECT md5, kind, file_name, file_size, modify_time, month, rel_path, abs_path
+        FROM media_files WHERE 1=1
+    """
+    params: List[Any] = []
+    if keyword and keyword.strip():
+        sql += " AND file_name LIKE ? ESCAPE '\\'"
+        params.append(f"%{_escape_like(keyword.strip())}%")
+    if kind and kind.strip():
+        sql += " AND kind = ?"
+        params.append(kind.strip().lower())
+    if month and month.strip():
+        sql += " AND month = ?"
+        params.append(month.strip())
+    sql += " ORDER BY modify_time DESC LIMIT ?"
+    params.append(limit)
+
+    rows = cur.execute(sql, params).fetchall()
+    conn.close()
+    return [
+        {
+            "md5": r["md5"],
+            "kind": r["kind"],
+            "file_name": r["file_name"],
+            "file_size": r["file_size"],
+            "time": _ts_to_str(r["modify_time"]),
+            "month": r["month"],
+            "rel_path": r["rel_path"],
+            "abs_path": r["abs_path"],
+            "exists": bool(r["abs_path"]) and Path(r["abs_path"]).is_file(),
+        }
+        for r in rows
+    ]
+
+@mcp.tool()
+def list_favorites(keyword: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    """查询绿泡泡收藏条目（标题 / 描述 / 来源）。
+
+    Args:
+        keyword: 可选，按标题或描述搜索
+        limit: 返回数量，默认 20
+    """
+    err = _check_db_initialized()
+    if err:
+        return [{"error": err}]
+    conn = get_connection()
+    cur = conn.cursor()
+
+    sql = "SELECT local_id, type, update_time, title, description, from_user FROM favorites WHERE 1=1"
+    params: List[Any] = []
+    if keyword and keyword.strip():
+        kw = f"%{_escape_like(keyword.strip())}%"
+        sql += " AND (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')"
+        params.extend([kw, kw])
+    sql += " ORDER BY update_time DESC LIMIT ?"
+    params.append(limit)
+
+    rows = cur.execute(sql, params).fetchall()
+    conn.close()
+    return [
+        {
+            "local_id": r["local_id"],
+            "type": r["type"],
+            "time": _ts_to_str(r["update_time"]),
+            "title": r["title"],
+            "description": r["description"],
+            "from_user": r["from_user"],
+        }
+        for r in rows
+    ]
+
 def main():
     mcp.run()
 

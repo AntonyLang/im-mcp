@@ -174,8 +174,9 @@ def sync_v4(decrypted_dir: Path, cur: sqlite3.Cursor) -> None:
                         target_session = session_name or f"chat_{tbl_hash}"
                         content = build_content(r["local_type"], r["message_content"], r["source"])
 
+                        # 用 REPLACE 而非 IGNORE：解析逻辑升级后重跑 ETL 可刷新既有消息内容
                         cur.execute("""
-                            INSERT OR IGNORE INTO messages 
+                            INSERT OR REPLACE INTO messages 
                             (source_file, local_id, session_username, sender_username, create_time, local_type, content)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
                         """, (db_file.name, r["local_id"], target_session, sender_name, r["create_time"], r["local_type"], content))
