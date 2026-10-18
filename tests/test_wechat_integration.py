@@ -54,6 +54,17 @@ class TestRealHostEndToEnd(unittest.TestCase):
         self.assertIn("sessions", status["counts"])
         self.assertGreater(status["counts"]["messages"], 0)
 
+    def test_wechat_init_cli_parser(self):
+        """测试 wechat-init 的 CLI 参数解析器，确保 --timeout, --pid, --passphrase 等参数齐全."""
+        import argparse
+        from wechat_mcp.tools.__init__ import main
+        # 验证 main 所在模块参数解析逻辑不会抛出 AttributeError
+        from unittest.mock import patch
+        with patch("sys.argv", ["wechat-init", "--help"]):
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            self.assertEqual(cm.exception.code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,17 @@ def main() -> None:
         help="绿泡泡 4.1+ 密钥派生口令（64位十六进制，若提供则自动保存并用于解密）",
     )
     parser.add_argument(
+        "--pid",
+        type=int,
+        help="显式指定微信进程 PID（排障或多进程场景使用）",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=0,
+        help="捕获密钥超时时间（秒，默认 0 表示持续监听）",
+    )
+    parser.add_argument(
         "--only-extract",
         action="store_true",
         help="仅提取密钥，不立即解密数据库",
@@ -98,6 +109,8 @@ def main() -> None:
         decrypted_dir=str(output_dir),
         decrypt=not args.only_extract,
         verbose=args.verbose,
+        timeout=getattr(args, "timeout", 0),
+        pid=getattr(args, "pid", None),
     )
 
     if args.passphrase:

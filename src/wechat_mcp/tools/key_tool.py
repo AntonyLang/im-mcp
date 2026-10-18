@@ -36,10 +36,12 @@ import json
 import logging
 import os
 import re
+import select
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -750,6 +752,306 @@ def capture_passphrase_experimental(pid: int | None = None, timeout: int = DEFAU
 
 
 # ============================================================
+# LLDB 断点捕获（macOS 微信 4.1.10+：断点 CommonCrypto CCKeyDerivationPBKDF）
+# ============================================================
+
+DEFAULT_LLDB_TIMEOUT = 0  # 0 表示持续监听，直到捕获成功或手动中断
+
+
+class LLDBPassphraseCaptureError(RuntimeError):
+    pass
+
+
+def check_lldb_prerequisites() -> list[str]:
+    issues = []
+    if not shutil.which("lldb"):
+        issues.append("未检测到 lldb，请安装 Xcode Command Line Tools: xcode-select --install")
+    return issues
+
+
+def _find_wechat_pid_macos() -> int | None:
+    try:
+        r = subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True, text=True)
+        pids = [int(p) for p in r.stdout.split() if p.strip().isdigit()]
+        return pids[0] if pids else None
+    except Exception:
+        return None
+
+
+def _cleanup_lldb_orphans_macos() -> None:
+    # 绝不能对 LLDB.framework.*debugserver 使用 SIGKILL (-9)！
+    # macOS 调试子系统既定行为：debugserver 被 SIGKILL 时其 tracee（微信）会被系统连带 SIGKILL 强杀。
+    # 优先使用 SIGTERM 优雅退出；先通知 lldb，再通知 debugserver
+    for pat in (["pkill", "-TERM", "-x", "lldb"],
+                ["pkill", "-TERM", "-f", "LLDB.framework.*debugserver"]):
+        try:
+            subprocess.run(pat, capture_output=True, timeout=3)
+        except Exception:
+            pass
+    # 等待片刻，若 lldb 仍有残留，仅对 lldb 进程进行 -9，但绝不 -9 debugserver
+    try:
+        time.sleep(0.5)
+        subprocess.run(["pkill", "-9", "-x", "lldb"], capture_output=True, timeout=2)
+    except Exception:
+        pass
+
+
+def _parse_lldb_passphrase(out: str) -> str | None:
+    """从 lldb `memory read --format x` 的 hexdump 中解析 32 字节 passphrase。"""
+    by: list[str] = []
+    for line in out.splitlines():
+        m = re.match(r"\s*0x[0-9a-f]+:\s+((?:0x[0-9a-f]{2}\s*)+)$", line)
+        if m:
+            by += re.findall(r"0x([0-9a-f]{2})", m.group(1))
+    return "".join(by[:32]) if len(by) >= 32 else None
+
+
+def capture_passphrase_lldb(timeout: int = DEFAULT_LLDB_TIMEOUT, pid: int | None = None) -> str:
+    """attach 微信进程，在 CCKeyDerivationPBKDF 上断点，等待用户重新登录触发命中。"""
+    import platform
+
+    issues = check_lldb_prerequisites()
+    if issues:
+        raise LLDBPassphraseCaptureError("; ".join(issues))
+
+    target_pid = pid or _find_wechat_pid_macos()
+    if not target_pid:
+        raise LLDBPassphraseCaptureError("未找到微信进程。请确保微信已启动（停留在扫码登录界面或已登录）")
+
+    is_arm = platform.machine() in ("arm64", "aarch64")
+    pw_reg, len_reg = ("x1", "x2") if is_arm else ("rsi", "rdx")
+
+    script = (
+        "settings set target.preload-symbols false\n"
+        f"process attach -p {target_pid}\n"
+        f"breakpoint set -n CCKeyDerivationPBKDF -c '${len_reg} == 32'\n"
+        "breakpoint command add 1\n"
+        f"memory read --size 1 --count 32 --format x ${pw_reg}\n"
+        "detach\n"
+        "quit\n"
+        "DONE\n"
+        "process continue\n"
+    )
+    fd, sp = tempfile.mkstemp(suffix=".lldb", prefix="wxcap_")
+    with os.fdopen(fd, "w") as f:
+        f.write(script)
+
+    # 关键修复：当后台启动（如 nohup ... </dev/null）时，若 stdin 关闭或为 /dev/null，
+    # cat 读 stdin 会立刻得到 EOF 退出，导致管道写端全部关闭，lldb 收到 EOF 退出并连带关闭。
+    # 因此超时采用精确 sleep；timeout=0 时采用超长 sleep（2147483647 秒，约 68 年）保活管道。
+    sleep_sec = timeout if timeout > 0 else 2147483647
+    proc = subprocess.Popen(
+        ["bash", "-c", f"( cat {sp}; sleep {sleep_sec} ) | TERM=dumb lldb"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    buf = ""
+    deadline = (time.time() + timeout) if timeout > 0 else None
+    last_check_pid_time = time.time()
+    try:
+        while deadline is None or time.time() < deadline:
+            r, _, _ = select.select([proc.stdout], [], [], 1.0)
+            if r:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                buf += line
+            if _parse_lldb_passphrase(buf):
+                break
+
+            # 进程漂移容错：每隔 2 秒检查目标微信进程是否仍然存活
+            now = time.time()
+            if now - last_check_pid_time >= 2.0:
+                last_check_pid_time = now
+                current_pid = _find_wechat_pid_macos()
+                if not current_pid:
+                    logger.warning(f"微信进程 (PID={target_pid}) 已完全退出")
+                elif current_pid != target_pid:
+                    logger.warning(
+                        f"检测到微信进程已重启 (原PID: {target_pid} -> 新PID: {current_pid})！"
+                        "原监听断点已失效，请重新启动 wechat-init 进行监听"
+                    )
+                    raise LLDBPassphraseCaptureError(
+                        f"微信进程已重启（PID 由 {target_pid} 变为 {current_pid}），监听断点失效！\n"
+                        "【正确操作顺序】：\n"
+                        "1. 在微信上点击「设置」->「退出登录」，使微信窗口停留在扫码登录界面；\n"
+                        "2. 重新启动 wechat-init（绑定扫码界面的新进程）；\n"
+                        "3. 掏出手机扫码登录微信。"
+                    )
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            os.unlink(sp)
+        except OSError:
+            pass
+        _cleanup_lldb_orphans_macos()
+
+    ph = _parse_lldb_passphrase(buf)
+    if ph:
+        logger.info("LLDB passphrase 捕获成功")
+        return ph
+    raise LLDBPassphraseCaptureError(
+        "未捕获到 passphrase。\n"
+        "常见排查与原因：\n"
+        "  1) 微信进程在监听期间重启（退出登录会导致微信重启，PID 发生变化）\n"
+        "     → 正确顺序：先在微信内退出登录停在扫码界面，再启动 wechat-init 监听，最后扫码登录。\n"
+        "  2) 权限受限（若为非 disabled SIP 机器且未重签名）\n"
+        "     → 执行一次重签名：sudo codesign --force --deep --sign - /Applications/WeChat.app\n"
+        "  3) 微信未调用 CCKeyDerivationPBKDF 或超时退出。"
+    )
+
+
+# ============================================================
+# macOS 4.0.x 内存明文扫描 (raw key)
+# ============================================================
+
+def _task_for_pid_macos(pid: int) -> int:
+    task = ctypes.c_uint32(0)
+    kr = _libSystem.task_for_pid(_libSystem.mach_task_self(), ctypes.c_int(pid), ctypes.byref(task))
+    if kr != 0:
+        raise PermissionError(
+            f"task_for_pid failed for PID={pid} (kern_return={kr})。"
+            "请以 sudo / 管理员权限运行，或确认微信已重签名去除 Hardened Runtime。"
+        )
+    return task.value
+
+
+class _vm_region_basic_info_64(ctypes.Structure):
+    _fields_ = [
+        ("protection", ctypes.c_int32),
+        ("max_protection", ctypes.c_int32),
+        ("inheritance", ctypes.c_uint32),
+        ("shared", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("offset", ctypes.c_uint64),
+        ("behavior", ctypes.c_int32),
+        ("user_wired_count", ctypes.c_uint16),
+    ]
+
+
+def _enum_readable_regions_macos(task: int) -> list[tuple[int, int]]:
+    regions: list[tuple[int, int]] = []
+    address = ctypes.c_uint64(0)
+    size = ctypes.c_uint64(0)
+    info = _vm_region_basic_info_64()
+    info_count = ctypes.c_uint32(9)
+    object_name = ctypes.c_uint32(0)
+
+    while True:
+        kr = _libSystem.mach_vm_region(
+            ctypes.c_uint32(task),
+            ctypes.byref(address),
+            ctypes.byref(size),
+            ctypes.c_int(9),
+            ctypes.byref(info),
+            ctypes.byref(info_count),
+            ctypes.byref(object_name),
+        )
+        if kr != 0:
+            break
+
+        reg_size = size.value
+        if (info.protection & 0x01) and 0 < reg_size < 500 * 1024 * 1024:
+            regions.append((address.value, reg_size))
+
+        next_addr = address.value + reg_size
+        if next_addr <= address.value:
+            break
+        address.value = next_addr
+
+    return regions
+
+
+def _read_memory_macos(task: int, address: int, size: int) -> bytes | None:
+    # 钳制单次读取大小上限，避免对大区段触发 SIGBUS
+    if size <= 0 or size > 32 * 1024 * 1024:
+        return None
+    data_ptr = ctypes.c_uint64(0)
+    data_size = ctypes.c_uint64(0)
+    kr = _libSystem.mach_vm_read(
+        ctypes.c_uint32(task),
+        ctypes.c_uint64(address),
+        ctypes.c_uint64(size),
+        ctypes.byref(data_ptr),
+        ctypes.byref(data_size),
+    )
+    if kr != 0 or data_size.value == 0:
+        return None
+    try:
+        return ctypes.string_at(data_ptr.value, data_size.value)
+    except Exception:
+        return None
+    finally:
+        _libSystem.mach_vm_deallocate(_libSystem.mach_task_self(), data_ptr, data_size)
+
+
+def _scan_memory_raw_key_macos(db_dir: str, keys_file: str) -> dict:
+    """macOS 下扫描微信进程内存，匹配 x'<64hex_enc_key><32hex_salt>'（微信 4.0.x）。"""
+    db_files, salt_to_dbs = collect_db_files(db_dir)
+    if not db_files:
+        raise RuntimeError(f"在 {db_dir} 未找到可解密的 .db 文件")
+
+    r = subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True, text=True)
+    pids = [int(p) for p in r.stdout.split() if p.strip().isdigit()]
+    if not pids:
+        raise RuntimeError("未找到微信进程，请先启动微信")
+
+    key_map: dict[str, str] = {}
+    remaining_salts = set(salt_to_dbs.keys())
+    task_ok_count = 0
+    pattern = re.compile(rb"x'([0-9a-f]{96})'")
+
+    for pid in pids:
+        if not remaining_salts:
+            break
+        try:
+            task = _task_for_pid_macos(pid)
+            task_ok_count += 1
+        except PermissionError as e:
+            logger.warning(f"{e}")
+            continue
+
+        regions = _enum_readable_regions_macos(task)
+        for base, size in regions:
+            if not remaining_salts:
+                break
+            data = _read_memory_macos(task, base, size)
+            if not data:
+                continue
+            for m in pattern.finditer(data):
+                hex_str = m.group(1).decode()
+                enc_key_hex, salt_hex = hex_str[:64], hex_str[64:]
+                if salt_hex not in remaining_salts:
+                    continue
+                enc_key = bytes.fromhex(enc_key_hex)
+                for rel, _path, _sz, s, page1 in db_files:
+                    if s == salt_hex and verify_enc_key(enc_key, page1):
+                        key_map[salt_hex] = enc_key_hex
+                        remaining_salts.discard(salt_hex)
+                        _print(f"  [FOUND] salt={salt_hex} enc_key={enc_key_hex}")
+                        break
+
+    if not key_map:
+        if task_ok_count == 0:
+            raise PermissionError("所有微信进程都无法读取内存（task_for_pid 失败），需以 sudo 运行或重签名去除 Hardened Runtime")
+        raise RuntimeError("能读内存但未扫到明文密钥（微信版本可能是 4.1+）")
+
+    _save_results(db_files, salt_to_dbs, key_map, db_dir, keys_file)
+    return key_map
+
+
+# ============================================================
 # PBKDF2 Key Derivation（拿到 passphrase 后走这条路，三平台通用）
 # ============================================================
 
@@ -1179,9 +1481,60 @@ def cmd_extract(args: argparse.Namespace) -> None:
             return
         _print("[!] 已保存的 passphrase 无效，改走内存扫描")
 
-    # 第 2 级：内存扫描 raw key（仅对仍缓存明文密钥的绿泡泡老版本有效，Windows/Linux 支持）
+    # 第 2 级：内存扫描 raw key（仅对仍缓存明文密钥的绿泡泡老版本有效，Windows/macOS 4.0.x 支持）
     if sys.platform == "win32":
         _scan_memory_raw_key(db_dir, out_file)
+    elif sys.platform == "darwin":
+        # 优先检测微信版本：4.1+ 直接进入 LLDB 捕获，避免对 4.1+ 遍历不可读内存区触发 SIGBUS
+        is_wechat_41_plus = True
+        try:
+            r = subprocess.run(
+                ["defaults", "read", "/Applications/WeChat.app/Contents/Info.plist", "CFBundleShortVersionString"],
+                capture_output=True, text=True, timeout=5,
+            )
+            ver = r.stdout.strip()
+            if ver and ver.startswith("4.0."):
+                is_wechat_41_plus = False
+        except Exception:
+            pass
+
+        key_map = None
+        if not is_wechat_41_plus:
+            try:
+                key_map = _scan_memory_raw_key_macos(db_dir, out_file)
+            except Exception as e:
+                logger.info(f"4.0.x 内存扫描未获取到明文密钥（{e}），尝试 LLDB 断点捕获...")
+
+        if not key_map:
+            _print()
+            _print("=" * 60)
+            _print("  检测到微信 4.1+，正在通过 LLDB 断点捕获口令原料")
+            _print("=" * 60)
+            target_pid = getattr(args, "pid", None) or _find_wechat_pid_macos()
+            if target_pid:
+                _print(f"[*] 目标微信进程 PID: {target_pid}")
+            _print("💡 操作提示：")
+            _print("   请在 Mac 微信主界面操作：点击左下角「设置」->「账号与存储」->「退出登录」（切勿退出整个微信程序）")
+            _print("   然后使用手机微信重新扫码/确认登录（触发密钥派生）")
+            to_val = getattr(args, "timeout", DEFAULT_LLDB_TIMEOUT)
+            if to_val and to_val > 0:
+                _print(f"等待最多 {to_val} 秒...")
+            else:
+                _print("持续监听中，等待微信扫码登录...")
+            try:
+                passphrase_hex = capture_passphrase_lldb(timeout=to_val, pid=getattr(args, "pid", None))
+                _print(f"[+] passphrase 捕获成功: {passphrase_hex[:8]}...（已截断）")
+                save_passphrase(passphrase_hex)
+                _print("\n[*] 开始 PBKDF2 派生密钥（约需 30-60 秒）...")
+                key_map = _derive_keys_from_passphrase(bytes.fromhex(passphrase_hex), db_files, salt_to_dbs)
+                if not key_map:
+                    _print("[ERROR] PBKDF2 派生后未能验证任何密钥，请检查数据库目录")
+                    sys.exit(1)
+                _save_results(db_files, salt_to_dbs, key_map, db_dir, out_file)
+            except LLDBPassphraseCaptureError as lldb_err:
+                _print(f"[ERROR] LLDB 捕获失败: {lldb_err}")
+                _print("    提示: 可通过 `wechat-init --passphrase <64位hex>` 直接指定口令跳过断点捕获。")
+                sys.exit(1)
     else:
         _print(f"[*] 当前平台 ({sys.platform}) 微信 4.1+ 需配置 passphrase。")
         _print("    请使用 `wechat-init set-passphrase <64位hex>` 或配置 wechat-passphrase.json")
@@ -1256,6 +1609,12 @@ def main() -> None:
         )
         capture_cmd.add_argument("--pid", type=int, help="绿泡泡进程 PID（默认自动查找）")
         capture_cmd.add_argument("--timeout", type=int, default=DEFAULT_CDB_TIMEOUT)
+    elif sys.platform == "darwin":
+        capture_cmd = sub.add_parser(
+            "capture-lldb",
+            help="使用 LLDB 断点捕获 4.1+ passphrase",
+        )
+        capture_cmd.add_argument("--timeout", type=int, default=DEFAULT_LLDB_TIMEOUT)
 
     passphrase_cmd = sub.add_parser("set-passphrase", help="手动填入通过其他手段获取的 passphrase")
     passphrase_cmd.add_argument("passphrase", help="64 位十六进制字符串（32 字节）")
@@ -1273,6 +1632,11 @@ def main() -> None:
         cmd_extract(args)
     elif args.command == "capture-experimental":
         cmd_capture_experimental(args)
+    elif args.command == "capture-lldb":
+        _print("请在微信中执行：设置 -> 退出登录 -> 重新登录（触发密钥派生）")
+        ph = capture_passphrase_lldb(timeout=args.timeout)
+        save_passphrase(ph)
+        _print(f"[+] 已保存 passphrase: {ph[:8]}...")
     elif args.command == "set-passphrase":
         cmd_set_passphrase(args)
     elif args.command == "decrypt":
