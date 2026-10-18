@@ -54,6 +54,30 @@ class TestRealHostEndToEnd(unittest.TestCase):
         self.assertIn("sessions", status["counts"])
         self.assertGreater(status["counts"]["messages"], 0)
 
+    def test_wechat_init_cli_parser(self):
+        """测试 wechat-init 的 CLI 参数解析器，确保 --timeout, --pid, --passphrase 等参数齐全."""
+        import argparse
+        from wechat_mcp.tools.__init__ import main
+        from unittest.mock import patch
+        with patch("sys.argv", ["wechat-init", "--help"]):
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            self.assertEqual(cm.exception.code, 0)
+
+    def test_wechat_init_passphrase_import(self):
+        """测试 wechat-init --passphrase 分支，确保 save_passphrase 被正确导入且不抛 NameError."""
+        from wechat_mcp.tools.__init__ import main
+        from unittest.mock import patch, MagicMock
+
+        # 模拟传入合法的 64 位十六进制 passphrase，并拦截后续提取流程避免执行真实系统操作
+        valid_ph = "0123456789abcdef" * 4
+        with patch("sys.argv", ["wechat-init", "--passphrase", valid_ph, "--only-extract"]), \
+             patch("wechat_mcp.tools.__init__.save_passphrase") as mock_save, \
+             patch("wechat_mcp.tools.__init__.cmd_extract") as mock_extract:
+            main()
+            mock_save.assert_called_once_with(valid_ph)
+            mock_extract.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

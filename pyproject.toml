@@ -15,6 +15,7 @@ authors = [
 dependencies = [
     "mcp>=1.2.0,<2.0.0",
     "pydantic>=2.0.0",
+    "cryptography<43; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
 [project.optional-dependencies]

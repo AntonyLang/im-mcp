@@ -28,7 +28,7 @@
 
 | 平台 | 支持版本范围 | 实测验证版本 | 架构与平台 | 解密 / 同步原理 |
 |---|---|---|---|---|
-| **绿泡泡 (WeChat)** | **绿泡泡 4.x** 全系列<br>*(兼容 3.9.x)* | **`4.1.15.13`** (Windows 最新版)<br>**`4.1.35.15`** (macOS 最新版)<br>`4.1.11.x` 等 | Windows x64<br>macOS (Apple Silicon & Intel) | **Windows**: 运行时扫描 `Weixin.exe` Config.Cipher 动态提取 Salt 密钥；<br>**macOS**: 原生 `CommonCrypto` (CCCrypt) 零额外依赖解密，支持 passphrase PBKDF2 派生；离线 HMAC 校验并解密 WCDB SQLite |
+| **绿泡泡 (WeChat)** | **绿泡泡 4.x** 全系列<br>*(兼容 3.9.x)* | **`4.1.15.13`** (Windows 最新版)<br>**`4.1.35.15`** (macOS ARM64 最新版)<br>**`4.1.15` (270115)** (macOS x86_64 实测验证)<br>`4.1.11.x` 等 | Windows x64<br>macOS (Apple Silicon & Intel) | **Windows**: 运行时扫描 `Weixin.exe` Config.Cipher 动态提取 Salt 密钥；<br>**macOS**: 原生 `CommonCrypto` (CCCrypt) 零额外依赖解密，支持 passphrase PBKDF2 派生；离线 HMAC 校验并解密 WCDB SQLite |
 | **DuangDuang (DingTalk)** | **DuangDuang 7.x** 全系列<br>*(涵盖 V2 与 V3)* | **`7.6.0.x`** (最新版)<br>`7.5.x` / `7.0.x` | Windows x64 / macOS | 纯离线读取用户目录 `user_config`，通过 PBKDF2-HMAC-SHA1 + MD5 推导 AES-128 密钥并合并 WAL 事务 |
 
 ---

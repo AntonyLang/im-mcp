@@ -65,10 +65,33 @@ dingtalk-init
   微信需要从正在运行的客户端进程内存中提取密钥并执行校验。**微信客户端必须处于启动并已登录状态**。若微信未启动，`wechat-init` 会报错。
 - **macOS**：
   ```bash
-  # macOS: 支持直接传入 64 位 passphrase
-  wechat-init --passphrase <64位十六进制passphrase>
+  # macOS: 一键执行初始化（自动检测并启用 LLDB 持续断点捕获）
+  wechat-init
   ```
-  工具会自动定位 macOS 微信数据目录（`~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/db_storage`），调用系统原生 `CommonCrypto`（`CCCrypt`）派生密钥并完成解密。
+  工具会自动定位 macOS 微信数据目录（`~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/db_storage`），并按层级进行密钥获取：
+  - **前置权限（如遇 attach 失败）**：macOS 系统存在 Hardened Runtime 与 SIP 保护，官方安装的微信默认禁止外部调试器附加。若执行提示权限受阻，需指引用户在 Mac 终端执行一次重签名去除限制（不影响微信正常使用）：
+    ```bash
+    sudo codesign --force --deep --sign - /Applications/WeChat.app
+    ```
+  - **智能体必须遵循的异步协同交互规范（重要！Mac 微信退出账号与监听规范）**：
+    微信 4.1+ 仅在**扫码/确认登录的瞬间**调用系统加密库派生密钥。在后台常驻运行时无法捕获。
+    ⚠️ **核心操作区分（重中之重）**：
+    - ✅ **正确操作**：在 Mac 微信主界面点击**「设置」->「退出」->「退出账号」**（停留在微信扫码/切换账号界面），或者点击微信界面左下角图标弹出菜单选择**「退出账号」**。此时微信进程保持运行，断点稳固监听！
+    - ❌ **严重误区**：绝对不能按 `Cmd + Q` 或在 Dock 栏右键选择「退出微信」，这会导致微信整个软件进程被彻底杀掉；
+    - **标准交互流程**：
+      1. **后台拉起持续监听**：智能体在后台静默启动 `wechat-init`（默认持续监听）：
+         ```bash
+         nohup wechat-init > /tmp/wechat-init.log 2>&1 &
+         ```
+      2. **当场向用户发出精准提示**：
+         > 💡 **“我已在后台开启密钥监听。请在 Mac 微信主界面操作：点击左下角「设置」->「账号与存储」->「退出登录」（注意是退出当前账号，切勿使用 Cmd+Q 退出整个微信软件），然后掏出手机重新扫码登录。登录完成后请回复我，我为您检查并完成解密！”**
+      3. **等待用户确认**：用户回复已重新扫码登录后，检查 `/tmp/wechat-init.log` 验证 passphrase 捕获与解密。
+      4. **进程漂移与容错保障**：底层已内置 PID 自动巡检（若用户不慎重启导致 PID 变更会精准提醒）、常驻 stdin 保活（后台启动绝不因 EOF 退出）以及优雅退出保护（绝不误杀微信）。
+  - **手动传参降级**：若用户已有 64 位十六进制 passphrase，支持直接传入跳过断点捕获：
+    ```bash
+    wechat-init --passphrase <64位十六进制passphrase>
+    ```
+  捕获或填入口令后，会自动持久化到 `~/.wcdb-key-tool/wechat-passphrase.json`，后续增量同步均无需重复抓取。工具会自动调用系统原生 `CommonCrypto`（`CCCrypt`）高效派生密钥并完成多库解密与 WAL 合并。
 - **微信运行前置检查（禁止盲目扫描）**：
   - **重要约束**：**如果找不到微信进程或缺少密钥原料，智能体切勿自行尝试猜测扫描系统无关进程或遍历系统全局目录！**
   - **正确处置**：应主动向用户明确说明当前环境状态，引导用户准备环境或填入 passphrase。
